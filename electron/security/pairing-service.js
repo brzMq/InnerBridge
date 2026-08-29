@@ -25,7 +25,7 @@ function startPairingServer({ port = 7891, deviceId, identityFingerprint = '', p
         const input = JSON.parse((await bodyOf(req)) || '{}'); const fromDeviceId = String(input.fromDeviceId || ''); const toDeviceId = String(input.toDeviceId || '');
         if (!fromDeviceId || toDeviceId !== deviceId) return json(res, 404, { error: '目标设备不存在' });
         const result = pairing.request(fromDeviceId, toDeviceId);
-        const request = { sessionId: result.sessionId, fromDeviceId, fromDeviceName: String(input.fromDeviceName || fromDeviceId).slice(0, 80), fromFingerprint: String(input.fromFingerprint || '').slice(0, 256), expiresAt: result.expiresAt, state: 'pending' };
+        const request = { sessionId: result.sessionId, fromDeviceId, fromDeviceName: String(input.fromDeviceName || fromDeviceId).slice(0, 80), fromFingerprint: String(input.fromFingerprint || '').slice(0, 256), fromPublicKey: String(input.fromPublicKey || '').slice(0, 4096), expiresAt: result.expiresAt, state: 'pending' };
         sessions.set(result.sessionId, { ...request, code: result.code }); try { onRequest && onRequest({ ...request, code: result.code }); } catch { /* UI 通知异常不影响会话 */ }
         return json(res, 200, { ok: true, sessionId: result.sessionId, code: result.code, expiresAt: result.expiresAt });
       } catch (error) { return json(res, 400, { error: String(error.message || error) }); }

@@ -724,80 +724,25 @@ body {
 }
 .chat-input:focus { border-color: var(--accent); }
 
-/* ---------- SSH 面板 ---------- */
+/* ---------- 清单同步面板 ---------- */
 
-.ssh-panel {
+.sync-panel {
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 16px;
   margin-top: 16px;
 }
-.ssh-head {
+.sync-head {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
   margin-bottom: 12px;
 }
-.ssh-head h3 { font-size: 15px; font-weight: 600; }
-.ssh-body { display: flex; flex-direction: column; gap: 10px; }
-.ssh-ctl-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.ssh-port-group { display: flex; align-items: center; gap: 6px; }
-.ssh-keys-block { display: flex; flex-direction: column; gap: 8px; }
-.ssh-keys-head { display: flex; align-items: center; gap: 10px; }
-.ssh-keys-list { display: flex; flex-direction: column; gap: 6px; }
-.ssh-key-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 6px 10px;
-}
-.ssh-key-type {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--accent);
-  flex-shrink: 0;
-}
-.ssh-key-comment {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12.5px;
-  color: var(--text2);
-}
-.ssh-key-row { display: flex; gap: 8px; align-items: flex-start; }
-.ssh-key-input {
-  flex: 1;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 8px;
-  padding: 8px 11px;
-  font-family: var(--mono);
-  font-size: 12px;
-  outline: none;
-  resize: vertical;
-  min-height: 64px;
-}
-.ssh-key-input:focus { border-color: var(--accent); }
-.ssh-pubkey {
-  flex: 1;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 11px;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--text2);
-  word-break: break-all;
-  line-height: 1.5;
-}
-.ssh-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.sync-head h3 { font-size: 15px; font-weight: 600; }
+.sync-body { display: flex; flex-direction: column; gap: 10px; }
+.sync-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 /* ---------- 加载 ---------- */
 

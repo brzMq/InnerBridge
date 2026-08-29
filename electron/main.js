@@ -11,7 +11,6 @@ const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const { startChatServer } = require('./chat-server');
 const { storageStats, clearChatStorage } = require('./chat-storage');
-const ssh = require('./ssh');
 const { loadOrCreateIdentity } = require('../core/device-identity');
 const { createChallenge, signChallenge, verifyChallenge } = require('../core/light-auth');
 const { buildLocalDevice } = require('../core/capability-resolver');
@@ -102,7 +101,7 @@ function emitLog(entry) {
 /**
  * 记录一条运行日志
  * @param {string} level   info | warn | error
- * @param {string} source  模块/过程名（如 chat / share / mount / ssh / app）
+ * @param {string} source  模块/过程名（如 chat / share / mount / sync / app）
  * @param {string} message 日志内容（自动附带 ISO 时间戳）
  */
 function logEvent(level, source, message) {
@@ -169,8 +168,6 @@ const CHAT_MESSAGES_FILE = path.join(DATA_DIR, 'messages.jsonl');
 const CHAT_IMAGES_DIR = path.join(DATA_DIR, 'chat-images');
 const CHAT_FILES_DIR = path.join(DATA_DIR, 'chat-files');
 const TRANSFER_DIR = path.join(DATA_DIR, 'transfer');
-// 提权脚本目录：Temp 下无中文无空格路径（PowerShell 5.1 编码兼容）
-const SCRIPTS_DIR = path.join(os.tmpdir(), 'inner-net-scripts');
 
 function loadJSON(file, fallback) {
   try {
@@ -551,10 +548,12 @@ function mountOne(m, home) {
 /** 卸载 */
 function unmountPoint(mp) {
   if (IS_MAC) {
+    // 非递归删除：只有真正空目录才会被删掉，用户文件绝不会被清理。
+    // 同时回报未删除的原因，便于界面区分「已清理 / 目录非空需手动处理 / 本来就不存在」。
     const removeEmptyMountPoint = () => {
       if (!mp || path.parse(mp).root === mp) return { mountPointRemoved: false, mountPointRemovalReason: 'invalid' };
       try {
-        fs.rmdirSync(mp); // 非递归：只有真正空目录才会删除，用户文件绝不会被清理
+        fs.rmdirSync(mp);
         return { mountPointRemoved: true, mountPointRemovalReason: 'removed' };
       } catch (e) {
         if (e && e.code === 'ENOENT') return { mountPointRemoved: false, mountPointRemovalReason: 'missing' };
@@ -570,7 +569,7 @@ function unmountPoint(mp) {
         runCmd('diskutil', ['unmount', 'force', mp]);
         return { ok: true, ...removeEmptyMountPoint() };
       } catch (e2) {
-        // 未挂载时给友好提示，不抛错
+        // 未挂载时给友好提示，不抛错（离线设备的记录也要能走完卸载流程）
         const msg = String(e1.message || e1) + ' ' + String(e2.message || e2);
         if (/Unable to find disk|not currently mounted|not mounted|No such file/i.test(msg)) {
           return { ok: false, reason: 'not-mounted', ...removeEmptyMountPoint() };
@@ -778,7 +777,6 @@ function registerIpc() {
     };
     shares.push(item);
     saveShares(shares);
-    ssh.syncManifest(shares);
     logEvent('info', 'share', `新建共享「${finalShare}」${isUnified ? '（统一账号模式）' : ''}`);
     return item;
     } catch (err) {
@@ -802,8 +800,7 @@ function registerIpc() {
       if (s.autoAccount) removeUser(s.account);
       shares.splice(idx, 1);
       saveShares(shares);
-      ssh.syncManifest(shares);
-      logEvent('info', 'share', `删除共享「${s.shareName}」`);
+        logEvent('info', 'share', `删除共享「${s.shareName}」`);
       return shares;
     } catch (err) {
       logEvent('error', 'share', '删除共享失败: ' + (err.message || err));
@@ -824,8 +821,7 @@ function registerIpc() {
       runCmd('net', ['user', s.account, newPwd]);
       s.password = newPwd;
       saveShares(shares);
-      ssh.syncManifest(shares);
-      logEvent('info', 'share', `重置共享「${s.shareName}」密码`);
+        logEvent('info', 'share', `重置共享「${s.shareName}」密码`);
       return s;
     } catch (err) {
       logEvent('error', 'share', '重置共享密码失败: ' + (err.message || err));
@@ -856,8 +852,7 @@ function registerIpc() {
       }
       if (updated === 0) throw new Error('当前没有「统一账号模式」的共享，无需同步');
       saveShares(shares);
-      ssh.syncManifest(shares);
-      logEvent('info', 'share', `已同步 ${updated} 个统一账号共享的密码`);
+        logEvent('info', 'share', `已同步 ${updated} 个统一账号共享的密码`);
       return { updated, shares };
     } catch (err) {
       logEvent('error', 'share', '同步统一账号密码失败: ' + (err.message || err));
@@ -903,8 +898,7 @@ function registerIpc() {
       }
       }
       saveShares(shares);
-      ssh.syncManifest(shares);
-      const ok = results.filter((r) => r.status === 'ok').length;
+        const ok = results.filter((r) => r.status === 'ok').length;
       const fail = results.filter((r) => r.status === 'error').length;
       logEvent('info', 'share', `迁移到统一账号完成: 成功 ${ok}，失败 ${fail}，跳过 ${results.length - ok - fail}`);
       return { results, shares };
@@ -943,92 +937,6 @@ function registerIpc() {
     const shares = manifest.body.shares || [];
     logEvent('info', 'sync', `已从 ${host} 拉取 ${shares.length} 个共享（轻量 API）`);
     return shares;
-  });
-
-  // ---- SSH 免密通道 ----
-  // 脚本放 Temp 下无中文无空格的路径（PowerShell 5.1 按 GBK 解析无 BOM 的 UTF-8 脚本，
-  // 中文注释+中文路径的组合会导致脚本解析失败）
-  const scriptsDir = path.join(os.tmpdir(), 'inner-net-scripts');
-  try { fs.mkdirSync(scriptsDir, { recursive: true }); } catch { /* ignore */ }
-
-  ipcMain.handle('ssh:status', () => ssh.getSshStatus());
-  ipcMain.handle('ssh:enable', () => {
-    try {
-      const r = ssh.sshEnable(scriptsDir);
-      logEvent('info', 'ssh', 'OpenSSH Server 已启用' + (r.running ? '，服务运行中' : ''));
-      return r;
-    } catch (err) {
-      logEvent('error', 'ssh', '启用 OpenSSH Server 失败: ' + (err.message || err));
-      throw err;
-    }
-  });
-  ipcMain.handle('ssh:control', (e, action) => {
-    try {
-      const r = ssh.sshControl(scriptsDir, action);
-      logEvent('info', 'ssh', `SSH 服务已${action === 'start' ? '启动' : action === 'stop' ? '停止' : '操作'}`);
-      return r;
-    } catch (err) {
-      logEvent('error', 'ssh', `SSH 服务${action}失败: ${err.message || err}`);
-      throw err;
-    }
-  });
-  ipcMain.handle('ssh:setPort', (e, port) => {
-    try {
-      const r = ssh.sshSetPort(scriptsDir, port);
-      logEvent('info', 'ssh', `SSH 端口已设为 ${port}`);
-      return r;
-    } catch (err) {
-      logEvent('error', 'ssh', '修改 SSH 端口失败: ' + (err.message || err));
-      throw err;
-    }
-  });
-  ipcMain.handle('ssh:addKey', (e, pubkey) => {
-    try {
-      const r = ssh.sshAddKey(scriptsDir, pubkey);
-      logEvent('info', 'ssh', '已授权公钥');
-      return r;
-    } catch (err) {
-      logEvent('error', 'ssh', '授权公钥失败: ' + err.message);
-      throw err;
-    }
-  });
-  ipcMain.handle('ssh:listKeys', () => {
-    try {
-      return ssh.sshListKeys();
-    } catch (err) {
-      logEvent('error', 'ssh', '读取公钥列表失败: ' + err.message);
-      throw err;
-    }
-  });
-  ipcMain.handle('ssh:removeKey', (e, line) => {
-    try {
-      const r = ssh.sshRemoveKey(scriptsDir, line);
-      logEvent('info', 'ssh', '已删除公钥');
-      return r;
-    } catch (err) {
-      logEvent('error', 'ssh', '删除公钥失败: ' + err.message);
-      throw err;
-    }
-  });
-  ipcMain.handle('ssh:manifestReady', () => {
-    try {
-      return fs.existsSync(ssh.MANIFEST_FILE);
-    } catch {
-      return false;
-    }
-  });
-  ipcMain.handle('ssh:key', () => ssh.getOrCreateKey());
-  ipcMain.handle('share:apiPull', async (_e, { host, port = 7890, signed } = {}) => { if (!host) throw new Error('请输入 Windows 主机地址'); const response = await globalThis.fetch(`http://${host}:${Number(port)}/api/shares/manifest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ signed, requesterId: loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), {}).deviceId }) }); const body = await response.json(); if (!response.ok) throw new Error(body.error || '轻量 API 认证失败'); return body.shares || []; });
-  ipcMain.handle('ssh:pull', (e, { host, user, port }) => {
-    logEvent('info', 'ssh', `拉取共享清单: ${user}@${host}:${port || 22}`);
-    try {
-      const r = ssh.sshPull(host, user, port);
-      logEvent('info', 'ssh', `拉取成功，${(r || []).length} 个共享`);
-      return r;
-    } catch (err) {
-      logEvent('error', 'ssh', '拉取清单失败: ' + err.message);
-      throw err;
-    }
   });
 
   // ---- 运行日志 ----
@@ -1275,15 +1183,6 @@ app.whenReady().then(() => {
   startTransfer().catch((err) => logEvent('warn', 'transfer', '原生传输服务启动失败: ' + err.message));
   createWindow();
   logEvent('info', 'app', '主窗口已创建');
-
-  // 确保 SSH 公钥托管文件存在且 ACL 正确（延迟执行，不阻塞 UI）
-  setTimeout(() => {
-    try {
-      ssh.ensureAuthFile(SCRIPTS_DIR);
-    } catch (e) {
-      logEvent('warn', 'ssh', '确保公钥托管文件失败（非管理员时忽略）: ' + e.message);
-    }
-  }, 1500);
 
   // 启动自愈：修复历史遗留的共享目录 ACL 损坏（一次性，延迟执行不阻塞 UI）
   setTimeout(() => {

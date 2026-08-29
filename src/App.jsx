@@ -110,7 +110,7 @@ export default function App() {
 
       {isWin && !sys.isAdmin && (
         <div className="permission-warning" role="alert">
-          当前以普通权限运行，创建/修复 SMB 共享、ACL 和 SSH 服务等功能会受限。请退出程序后右键选择“以管理员身份运行”。
+          当前以普通权限运行，创建/修复 SMB 共享、ACL 等功能会受限。请退出程序后右键选择“以管理员身份运行”。
         </div>
       )}
 

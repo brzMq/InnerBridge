@@ -95,7 +95,7 @@ export default function LogPage() {
       <div className="page-head">
         <div>
           <h2>运行日志</h2>
-          <p className="sub">带时间戳的过程记录（应用启动、聊天服务、共享、挂载、SSH 等）</p>
+          <p className="sub">带时间戳的过程记录（应用启动、聊天服务、共享、挂载、清单同步等）</p>
         </div>
         <div className="head-actions">
           <label className="switch" title="关闭后日志视图冻结，不再实时更新">
@@ -119,7 +119,7 @@ export default function LogPage() {
         {logs.length === 0 ? (
           <div className="empty">
             <p>暂无日志</p>
-            <p className="sub">操作共享、挂载或 SSH 后这里会实时出现记录</p>
+            <p className="sub">操作共享、挂载或同步清单后这里会实时出现记录</p>
           </div>
         ) : (
           logs.map((e) => (

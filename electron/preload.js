@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('api', {
     getSettings: () => ipcRenderer.invoke('share:getSettings'),
     setSettings: (s) => ipcRenderer.invoke('share:setSettings', s),
     syncUnifiedPassword: (p) => ipcRenderer.invoke('share:syncUnifiedPassword', p),
+    apiPull: (p) => ipcRenderer.invoke('share:apiPull', p),
     migrateToUnified: (p) => ipcRenderer.invoke('share:migrateToUnified', p),
   },
 
@@ -57,16 +58,4 @@ contextBridge.exposeInMainWorld('api', {
     },
   },
 
-  ssh: {
-    status: () => ipcRenderer.invoke('ssh:status'),
-    enable: () => ipcRenderer.invoke('ssh:enable'),
-    control: (action) => ipcRenderer.invoke('ssh:control', action),
-    setPort: (port) => ipcRenderer.invoke('ssh:setPort', port),
-    addKey: (pubkey) => ipcRenderer.invoke("ssh:addKey", pubkey),
-    listKeys: () => ipcRenderer.invoke("ssh:listKeys"),
-    removeKey: (line) => ipcRenderer.invoke("ssh:removeKey", line),
-    manifestReady: () => ipcRenderer.invoke('ssh:manifestReady'),
-    key: () => ipcRenderer.invoke('ssh:key'),
-    pull: (p) => ipcRenderer.invoke('ssh:pull', p),
-  },
 });

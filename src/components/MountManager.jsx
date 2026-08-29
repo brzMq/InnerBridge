@@ -123,6 +123,7 @@ function SshSyncPanel({ onImported }) {
 export default function MountManager({ sys }) {
   const [mounts, setMounts] = useState([]);
   const [mode, setMode] = useState('autofs'); // autofs(LaunchAgent) | manual
+  const [syncMode, setSyncMode] = useState(() => localStorage.getItem('innernet-sync-mode') || 'ssh');
   const [root, setRoot] = useState(''); // 聚合根目录
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -305,7 +306,7 @@ export default function MountManager({ sys }) {
         </div>
       </div>
 
-      <SshSyncPanel onImported={refresh} />
+      <div className="sync-mode-switch"><span>清单同步方式</span><button className={`btn small ${syncMode === 'ssh' ? 'primary' : ''}`} onClick={() => { setSyncMode('ssh'); localStorage.setItem('innernet-sync-mode', 'ssh'); }}>SSH</button><button className={`btn small ${syncMode === 'api' ? 'primary' : ''}`} onClick={() => { setSyncMode('api'); localStorage.setItem('innernet-sync-mode', 'api'); }}>轻量 API</button></div>{syncMode === 'ssh' ? <SshSyncPanel onImported={refresh} /> : <div className="ssh-panel"><div className="ssh-head"><div><h3>轻量 API 同步清单</h3><p className="sub">使用已配对设备签名验证，不需要配置 sshd、防火墙或 authorized_keys。</p></div></div><div className="ssh-body"><p className="hint">请先在设备中心完成配对。轻量 API 通道正在接入，当前可切回 SSH 验证现有流程。</p></div></div>}
 
       {mounts.length === 0 ? (
         <div className="empty">

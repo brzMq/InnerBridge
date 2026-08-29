@@ -589,6 +589,7 @@ function getLocalIPs() {
 
 function registerIpc() {
   const credentialStore = createCredentialStore(path.join(DATA_DIR, 'trusted-devices.json'), { safeStorage });
+  trustedCredentialStore = credentialStore;
   ipcMain.handle('transfer:info', () => ({ port: transferServer?.port || null, localOnly: false, host: transferServer?.host || '0.0.0.0', root: TRANSFER_DIR }));
   ipcMain.handle('transfer:requestChallenge', async (_e, input = {}) => { const host = String(input.host || ''); const port = Number(input.port || 7891); if (!host || !input.sessionId || !input.transferId || !input.senderId) return { ok: false, reasonCode: 'CHALLENGE_PARAMS_INVALID' }; try { const response = await globalThis.fetch(`http://${host}:${port}/api/pair/transfer-challenge`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: input.sessionId, senderId: input.senderId, transferId: input.transferId }) }); const body = await response.json(); return response.ok ? body : { ok: false, reasonCode: 'CHALLENGE_REJECTED' }; } catch { return { ok: false, reasonCode: 'CHALLENGE_UNREACHABLE' }; } });
   ipcMain.handle('transfer:selectFile', async () => { const picked = await dialog.showOpenDialog({ properties: ['openFile', 'openDirectory'], title: '选择要传输的文件或文件夹' }); if (picked.canceled || !picked.filePaths[0]) return null; const file = picked.filePaths[0]; const stat = fs.statSync(file); if (stat.isDirectory()) return { path: file, name: path.basename(file), kind: 'folder', size: 0, sha256: null }; const sha256 = await hashFile(file); return { path: file, name: path.basename(file), kind: 'file', size: stat.size, sha256 }; });
@@ -1112,6 +1113,7 @@ function registerIpc() {
 let chatInfo = null;
 let pairingServer = null;
 let transferServer = null;
+let trustedCredentialStore = null;
 
 async function startTransfer() {
   if (transferServer) return transferServer;
@@ -1140,6 +1142,7 @@ function startChat() {
     imagesDir: CHAT_IMAGES_DIR,
     filesDir: CHAT_FILES_DIR,
     onEvent: (e) => logEvent(e.level, e.source, e.message),
+    shareManifest: () => loadShares(),
   })
     .then((info) => {
       chatInfo = info;

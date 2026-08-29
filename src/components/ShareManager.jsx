@@ -52,31 +52,11 @@ function AddShareForm({ sys, onDone, onCancel }) {
   const [shareName, setShareName] = useState('');
   const [account, setAccount] = useState('');
   const [password, setPassword] = useState('');
-  const [unified, setUnified] = useState(false);
+  const [unified] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
 
-  // 打开时读取设置并预填：统一账号模式用登录账号，否则自动生成
-  // A1：若无历史设置，Windows 端默认开启统一账号模式
-  useEffect(() => {
-    let cancelled = false;
-    window.api.shares.getSettings().then((s) => {
-      if (cancelled) return;
-      const u = s.unified === undefined ? (sys.platform === 'win32') : !!s.unified;
-      setUnified(u);
-      if (u) {
-        setAccount(sys.username || '');
-        setPassword('');
-      } else {
-        window.api.shares.gen().then((g) => {
-          if (cancelled) return;
-          setAccount(g.account);
-          setPassword(g.password);
-        });
-      }
-    });
-    return () => { cancelled = true; };
-  }, [sys]);
+  useEffect(() => { setAccount('shareuser'); setPassword(''); }, [sys]);
 
   const pickDir = async () => {
     const p = await window.api.selectFolder();
@@ -86,20 +66,6 @@ function AddShareForm({ sys, onDone, onCancel }) {
       const name = p.replace(/[\\/]$/, '').split(/[\\/]/).pop() || 'share';
       setShareName(name.replace(/[*?\/\\|:<>"]/g, '_'));
     }
-  };
-
-  const toggleUnified = (v) => {
-    setUnified(v);
-    if (v) {
-      setAccount(sys.username || '');
-      setPassword('');
-    } else {
-      window.api.shares.gen().then((g) => {
-        setAccount(g.account);
-        setPassword(g.password);
-      });
-    }
-    window.api.shares.setSettings({ unified: v });
   };
 
   const submit = async () => {
@@ -146,12 +112,6 @@ function AddShareForm({ sys, onDone, onCancel }) {
         共享名
         <input value={shareName} onChange={(e) => setShareName(e.target.value)} placeholder="例如: 设计资料" />
       </label>
-      {sys.platform === 'win32' && (
-        <label style={{ flexDirection: 'row', alignItems: 'center', gap: 8, fontSize: 12.5, color: 'var(--text)' }}>
-          <input type="checkbox" checked={unified} onChange={(e) => toggleUnified(e.target.checked)} />
-          <span>使用已有本地账号（推荐，需先在 Windows 中创建）</span>
-        </label>
-      )}
       {unified ? (
         <label>
           账号（专用本地账号）

@@ -256,6 +256,11 @@ function startChatServer(preferredPort = 7890, opts = {}) {
       return;
     }
 
+    // 轻量免密共享清单：仅由主进程注入已验证的签名校验器后开放
+    if (req.method === 'POST' && url.pathname === '/api/shares/manifest' && typeof opts.verifyShareAuth === 'function') {
+      try { const input = JSON.parse(await readBody(req)); if (!opts.verifyShareAuth(input.signed, input.requesterId)) return sendJSON(res, 403, { error: '设备未获信任' }); return sendJSON(res, 200, { shares: typeof opts.shareManifest === 'function' ? opts.shareManifest() : [] }); } catch { return sendJSON(res, 400, { error: '认证请求无效' }); }
+    }
+
     // 消息历史
     if (req.method === 'GET' && url.pathname === '/api/msg') {
       const list = selectMessages(messages, {

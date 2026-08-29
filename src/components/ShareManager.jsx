@@ -154,7 +154,7 @@ function AddShareForm({ sys, onDone, onCancel }) {
       )}
       {unified ? (
         <label>
-          账号（统一账号）
+          账号（专用本地账号）
           <input value={account || 'shareuser'} onChange={(e) => setAccount(e.target.value)} placeholder="shareuser" />
         </label>
       ) : (

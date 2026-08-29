@@ -734,10 +734,11 @@ function registerIpc() {
     let finalPassword;
     let autoAccount = false;
     if (isUnified) {
-      finalAccount = os.userInfo().username;
+      finalAccount = String(account || 'shareuser').trim();
       finalPassword = (password || '').trim();
-      if (!finalPassword) throw new Error('统一账号模式需要填写当前 Windows 登录密码');
-      // 账号已存在，不调用 ensureUser，autoAccount=false（删除共享时不删登录账号）
+      if (!finalPassword) throw new Error('专用本地账号模式需要填写账号密码');
+      const createdUser = ensureUser(finalAccount, finalPassword);
+      autoAccount = createdUser
     } else {
       finalAccount = account || genAccount();
       finalPassword = password || genPassword();

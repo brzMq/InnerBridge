@@ -2,7 +2,7 @@
 const crypto = require('crypto');
 
 const SCHEMA_VERSION = 1;
-const CAPABILITY_NAMES = ['chat', 'fileSend', 'fileReceive', 'smbShare', 'smbMount', 'sshSync', 'wolSender', 'wolTarget'];
+const CAPABILITY_NAMES = ['chat', 'fileSend', 'fileReceive', 'smbShare', 'smbMount', 'shareSync', 'wolSender', 'wolTarget'];
 
 function createDeviceId(randomBytes = crypto.randomBytes(16)) {
   return `dev_${randomBytes.toString('hex')}`;

@@ -5,7 +5,7 @@ const REASONS = { PLATFORM_NOT_SUPPORTED: '当前平台不支持此能力', NOT_
 
 function resolveCapabilities({ platform = process.platform, config = {}, services = {}, trusted = false } = {}) {
   const win = platform === 'win32'; const mac = platform === 'darwin';
-  const supported = { chat: true, fileSend: true, fileReceive: true, smbShare: win, smbMount: mac, sshSync: true, wolSender: true, wolTarget: true };
+  const supported = { chat: true, fileSend: true, fileReceive: true, smbShare: win, smbMount: mac, shareSync: true, wolSender: true, wolTarget: true };
   const result = {};
   for (const [name, isSupported] of Object.entries(supported)) {
     const configured = isSupported && config[name] !== false;

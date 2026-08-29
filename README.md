@@ -54,7 +54,7 @@ Electron 44 的 npm 包不再依赖 `postinstall` 自动下载二进制，因此
 
 ```text
 inner-net-unified/
-├── electron/                 # Electron 主进程、IPC、SMB/SSH、群聊与安全服务
+├── electron/                 # Electron 主进程、IPC、SMB、群聊与安全服务
 │   ├── main.js               # 按 Windows/macOS 启用对应能力
 │   ├── preload.js             # 安全暴露 IPC API
 │   ├── smb-mount.js           # macOS SMB 挂载与 LaunchAgent 脚本
@@ -78,9 +78,18 @@ inner-net-unified/
 
 ## 两端职责
 
-- Windows：创建 SMB 共享、校验/修复共享 ACL、提供 SSH 清单和群聊服务。
-- macOS：通过 SSH 同步清单，手动挂载或安装用户级 LaunchAgent 自动挂载。
+- Windows：创建 SMB 共享、校验/修复共享 ACL、提供已签名的共享清单接口和群聊服务。
+- macOS：通过轻量 API 拉取共享清单，手动挂载或安装用户级 LaunchAgent 自动挂载。
 - 公共：React 界面、聊天、日志、配置格式和测试共用一份代码。
+
+## 共享清单同步（轻量 API）
+
+- macOS 向 Windows 的 `7890` 端口发两步请求：先 `POST /api/shares/challenge` 取一次性挑战，
+  再用本机 Ed25519 私钥签名，然后 `POST /api/shares/manifest` 换取清单。
+- Windows 只对**已配对**设备下发挑战，并用配对时留存的公钥验签；未注入签发器/校验器时
+  这两个路由不注册，请求返回 404 而不是裸奔。
+- 清单只含 `shareName` / `account` / `unified`，**SMB 密码不出网**，由 macOS 保存在本机复用。
+- 因此不再需要安装 OpenSSH Server、配置端口、粘贴公钥授权和放行防火墙。
 
 ## 2.0 安全配对（P3）
 

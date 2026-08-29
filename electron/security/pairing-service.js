@@ -46,7 +46,7 @@ function startPairingServer({ port = 7891, deviceId, identityFingerprint = '', p
     const item = sessions.get(sessionId); if (!item) return { ok: false, reasonCode: 'SESSION_NOT_FOUND' };
     const result = pairing.confirm(sessionId, deviceId, code, item.fromFingerprint || item.fromDeviceId);
     item.state = result.ok ? 'accepted' : (result.reasonCode === 'EXPIRED' ? 'expired' : 'pending');
-    return { ok: result.ok, reasonCode: result.reasonCode, state: item.state, remoteDeviceId: item.fromDeviceId, remoteFingerprint: item.fromFingerprint, authorization: result.authorization };
+    return { ok: result.ok, reasonCode: result.reasonCode, state: item.state, remoteDeviceId: item.fromDeviceId, remoteFingerprint: item.fromFingerprint, remotePublicKey: item.fromPublicKey, authorization: result.authorization };
   }
   return new Promise((resolve, reject) => {
     server.once('error', reject);

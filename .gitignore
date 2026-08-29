@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+release/
+
+# Electron 打包中间产物
+win-unpacked/
+*.asar
+
+# 日志
+*.log
+npm-debug.log*
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+
+# 本地临时
+*.tmp
+.tmp/

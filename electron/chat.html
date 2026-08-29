@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>InnerNet 群聊</title>
+<style>
+  :root, :root[data-theme="light"] {
+    --bg: #f5f7fa; --bg2: #ffffff; --bg3: #eef1f5; --border: #d8dee8;
+    --text: #1f2a37; --text2: #6b7686; --accent: #2f6fce; --accent2: #3d82f0;
+    --ok: #2e9e5b; --warn: #b97f14; color-scheme: light;
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1419; --bg2: #161d26; --bg3: #1c2531; --border: #26303e;
+    --text: #e6edf3; --text2: #8b98a9; --accent: #4c9aff; --accent2: #2f6fce;
+    --ok: #3fb96f; --warn: #e0a53e; color-scheme: dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme]) {
+      --bg: #0f1419; --bg2: #161d26; --bg3: #1c2531; --border: #26303e;
+      --text: #e6edf3; --text2: #8b98a9; --accent: #4c9aff; --accent2: #2f6fce;
+      --ok: #3fb96f; --warn: #e0a53e; color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: 'PingFang SC', 'Microsoft YaHei', -apple-system, sans-serif;
+    background: var(--bg); color: var(--text); font-size: 14px;
+    display: flex; flex-direction: column;
+  }
+  header {
+    padding: 12px 16px; background: var(--bg2); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  header h1 { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); display: inline-block; }
+  .dot.on { background: var(--ok); }
+  #themeBtn {
+    background: var(--bg3); border: 1px solid var(--border); color: var(--text2);
+    border-radius: 999px; padding: 3px 10px; font-size: 11.5px; cursor: pointer; flex-shrink: 0;
+  }
+  #themeBtn:hover { color: var(--accent); border-color: var(--accent); }
+  #nickBox {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 7px; padding: 5px 10px; width: 100px; font-size: 13px; outline: none;
+  }
+  #nickBox:focus { border-color: var(--accent); }
+  #searchBox {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 7px; padding: 5px 10px; width: 120px; font-size: 13px; outline: none;
+  }
+  #searchBox:focus { border-color: var(--accent); }
+  #list { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { display: flex; flex-direction: column; gap: 2px; max-width: 82%; position: relative; }
+  .msg .head { font-size: 11.5px; color: var(--text2); display: flex; gap: 8px; }
+  .msg .head .nick { color: var(--accent); font-weight: 600; }
+  .msg .bubble {
+    background: var(--bg3); border: 1px solid var(--border); border-radius: 10px;
+    padding: 8px 12px; font-size: 14px; line-height: 1.5; word-break: break-word; white-space: pre-wrap;
+    -webkit-user-select: text; user-select: text;
+  }
+  .msg.mine { align-self: flex-end; align-items: flex-end; }
+  .msg.mine .bubble { background: var(--accent2); border-color: var(--accent2); color: #fff; }
+  .msg .copy, .msg .save, .msg .reply {
+    position: absolute; top: -9px; z-index: 2;
+    background: var(--bg3); border: 1px solid var(--border); color: var(--text2);
+    font-size: 11px; padding: 2px 8px; border-radius: 6px; cursor: pointer;
+    opacity: 0; transition: opacity .15s;
+  }
+  .msg .copy { right: 0; }
+  .msg .save { right: 40px; }
+  .msg .reply { right: 80px; }
+  .msg:hover .copy, .msg:hover .save, .msg:hover .reply { opacity: 1; }
+  .msg .copy:hover, .msg .save:hover, .msg .reply:hover { color: var(--accent); border-color: var(--accent); }
+  .reply-quote {
+    display: flex; flex-direction: column; gap: 2px; border-left: 3px solid var(--accent);
+    background: var(--bg); border-radius: 5px; padding: 5px 8px; margin-bottom: 6px;
+    color: var(--text2); font-size: 12px; max-width: 320px;
+  }
+  .reply-quote span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .msg.mine .reply-quote { color: rgba(255,255,255,.82); border-left-color: rgba(255,255,255,.75); }
+  .chat-file {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 12px; margin-bottom: 4px; text-decoration: none; color: var(--text);
+    max-width: 280px;
+  }
+  .chat-file:hover { border-color: var(--accent); }
+  .chat-file-icon { font-size: 20px; }
+  .chat-file-name {
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px;
+  }
+  .chat-file-dl { color: var(--accent); font-size: 12px; flex-shrink: 0; }
+  .hint-msg { text-align: center; color: var(--text2); font-size: 12px; padding: 20px 0; }
+  #replyBar {
+    display: none; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 7px 12px; background: var(--bg3); border-left: 3px solid var(--accent);
+    color: var(--text2); font-size: 12px;
+  }
+  #replyBar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #cancelReply { border: 0; background: transparent; color: var(--text2); font-size: 18px; cursor: pointer; }
+  footer { padding: 10px 12px; background: var(--bg2); border-top: 1px solid var(--border); display: flex; gap: 8px; }
+  #input {
+    flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 10px 12px; font-size: 14px; outline: none; resize: none;
+    font-family: inherit; min-height: 38px;
+  }
+  #input:focus { border-color: var(--accent); }
+  #sendBtn {
+    background: var(--accent); color: #fff; border: none; border-radius: 8px;
+    padding: 0 18px; font-size: 14px; cursor: pointer;
+  }
+  #sendBtn:disabled { opacity: .5; }
+  #status { font-size: 11.5px; color: var(--text2); flex-shrink: 0; }
+  .attachBtn {
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--bg3); border: 1px solid var(--border); color: var(--text2);
+    border-radius: 8px; font-size: 18px; cursor: pointer; flex-shrink: 0;
+    min-width: 44px;
+  }
+  .attachBtn:hover { color: var(--accent); border-color: var(--accent); }
+  .attachWrap { position: relative; flex-shrink: 0; }
+  .attachMenu {
+    position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 20;
+    display: flex; flex-direction: column; min-width: 145px; padding: 6px;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 10px 28px rgba(0,0,0,.35);
+  }
+  .attachMenu[hidden] { display: none; }
+  .attachMenu button {
+    border: 0; background: transparent; color: var(--text); text-align: left;
+    padding: 8px 10px; border-radius: 6px; cursor: pointer;
+  }
+  .attachMenu button:hover { background: var(--bg3); color: var(--accent); }
+  .bubble img {
+    display: block; max-width: 240px; max-height: 320px;
+    border-radius: 8px; margin-top: 4px;
+  }
+  .bubble .img-pending { color: var(--text2); font-size: 12px; }
+  @media (hover: none) {
+    .msg .copy, .msg .save, .msg .reply { opacity: 1; position: static; margin-right: 4px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1><span id="dot" class="dot"></span>InnerNet 群聊</h1>
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
+    <span id="status">连接中…</span>
+    <button id="themeBtn" title="切换主题">◐ 跟随系统</button>
+    <input id="searchBox" placeholder="搜索消息" />
+    <input id="nickBox" placeholder="昵称" maxlength="32" />
+  </div>
+</header>
+<div id="list"><div class="hint-msg">正在连接聊天服务…</div></div>
+<div id="replyBar"><span id="replyText"></span><button id="cancelReply" aria-label="取消回复">×</button></div>
+<footer>
+  <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+  <div class="attachWrap">
+    <button id="attachBtn" class="attachBtn" title="发送文件或文件夹">📎</button>
+    <div id="attachMenu" class="attachMenu" hidden>
+      <button id="chooseFileBtn">选择文件/图片</button>
+      <button id="chooseFolderBtn">选择文件夹</button>
+    </div>
+  </div>
+  <input id="fileInput" type="file" multiple accept="image/*,.txt,.text,.md,.markdown,.rst,.adoc,.csv,.tsv,.log,.json,.json5,.jsonl,.yaml,.yml,.toml,.ini,.conf,.cfg,.properties,.env,.xml,.xsl,.xsd,.sql,.js,.mjs,.cjs,.jsx,.ts,.tsx,.vue,.svelte,.astro,.py,.rb,.php,.java,.go,.rs,.c,.h,.cc,.cpp,.hpp,.cs,.swift,.kt,.kts,.sh,.bash,.zsh,.fish,.bat,.cmd,.ps1,.psm1,.html,.htm,.css,.scss,.less,.graphql,.gql,.tex,.rtf,.svg,.zip,.7z,.rar,.tar,.gz,.tgz,.bz2,.xz" hidden />
+  <input id="folderInput" type="file" webkitdirectory multiple hidden />
+  <button id="sendBtn">发送</button>
+</footer>
+<script src="/vendor/jszip.min.js"></script>
+<script>
+  (function () {
+    var nick = localStorage.getItem('inner-net-nick') || '访客' + Math.floor(Math.random() * 900 + 100);
+    var nickBox = document.getElementById('nickBox');
+    var input = document.getElementById('input');
+    var list = document.getElementById('list');
+    var dot = document.getElementById('dot');
+    var statusEl = document.getElementById('status');
+    var searchBox = document.getElementById('searchBox');
+    var sendBtn = document.getElementById('sendBtn');
+    var attachBtn = document.getElementById('attachBtn');
+    var attachMenu = document.getElementById('attachMenu');
+    var chooseFileBtn = document.getElementById('chooseFileBtn');
+    var chooseFolderBtn = document.getElementById('chooseFolderBtn');
+    var fileInput = document.getElementById('fileInput');
+    var folderInput = document.getElementById('folderInput');
+    var themeBtn = document.getElementById('themeBtn');
+    var replyBar = document.getElementById('replyBar');
+    var replyText = document.getElementById('replyText');
+    var cancelReply = document.getElementById('cancelReply');
+    var replyTo = null;
+    var online = 0;
+    var connected = false;
+    nickBox.value = nick;
+    nickBox.addEventListener('change', function () {
+      nick = nickBox.value.trim() || nick;
+      nickBox.value = nick;
+      localStorage.setItem('inner-net-nick', nick);
+    });
+
+    // 主题切换（与桌面端共享 localStorage key）
+    var theme = localStorage.getItem('inner-net-theme') || 'auto';
+    var themeLabels = { auto: '◐ 跟随系统', light: '☀ 亮色', dark: '☾ 暗色' };
+    function applyTheme(t) {
+      var root = document.documentElement;
+      if (t === 'auto') root.removeAttribute('data-theme');
+      else root.setAttribute('data-theme', t);
+      localStorage.setItem('inner-net-theme', t);
+      themeBtn.textContent = themeLabels[t];
+    }
+    themeBtn.addEventListener('click', function () {
+      theme = theme === 'auto' ? 'light' : theme === 'light' ? 'dark' : 'auto';
+      applyTheme(theme);
+    });
+    applyTheme(theme);
+
+    var es = new EventSource('/api/stream');
+    var seenIds = new Set();
+    function updateStatus() {
+      statusEl.textContent = connected ? '已连接 · ' + online + ' 人在线' : '连接断开，重连中…';
+    }
+    es.onopen = function () {
+      dot.className = 'dot on';
+      connected = true;
+      updateStatus();
+      fetch('/api/msg?limit=200').then(function (r) { return r.json(); }).then(function (d) {
+        list.innerHTML = '';
+        if (!d.messages.length) {
+          list.innerHTML = '<div class="hint-msg">群聊已就绪，发第一条消息吧</div>';
+        }
+        d.messages.forEach(render);
+        list.scrollTop = list.scrollHeight;
+      });
+    };
+    es.onerror = function () {
+      dot.className = 'dot';
+      connected = false;
+      updateStatus();
+    };
+    es.addEventListener('presence', function (e) {
+      try { online = Number(JSON.parse(e.data).online) || 0; updateStatus(); } catch (_) { /* ignore */ }
+    });
+    es.addEventListener('reset', function () {
+      seenIds.clear();
+      replyTo = null;
+      replyBar.style.display = 'none';
+      list.innerHTML = '<div class="hint-msg">聊天记录已由共享端清空</div>';
+    });
+    es.onmessage = function (e) {
+      render(JSON.parse(e.data));
+      list.scrollTop = list.scrollHeight;
+    };
+
+    function copyText(t) {
+      var ta = document.createElement('textarea');
+      ta.value = t;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      return ok;
+    }
+
+    function render(m) {
+      if (seenIds.has(m.id)) return; // 去重：自己发的消息会从 SSE 再回来一次
+      seenIds.add(m.id);
+      var hint = list.querySelector('.hint-msg');
+      if (hint) hint.remove();
+      var div = document.createElement('div');
+      div.className = 'msg' + (m.nick === nick ? ' mine' : '');
+      var t = new Date(m.ts);
+      var time = String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0');
+      var actions = '<button class="reply">回复</button>';
+      if (m.text) actions += '<button class="copy">复制</button><button class="save">保存</button>';
+      div.innerHTML =
+        actions +
+        '<div class="head"><span class="nick"></span><span>' + time + '</span></div>' +
+        '<div class="bubble"></div>';
+      div.querySelector('.nick').textContent = m.nick;
+      div.dataset.search = [m.nick, m.text, m.file && m.file.name, m.reply && m.reply.text]
+        .filter(Boolean).join('\n').toLowerCase();
+      if (m.reply) {
+        var quote = document.createElement('div');
+        quote.className = 'reply-quote';
+        var qnick = document.createElement('strong');
+        qnick.textContent = m.reply.nick;
+        var qtext = document.createElement('span');
+        qtext.textContent = m.reply.text;
+        quote.appendChild(qnick);
+        quote.appendChild(qtext);
+        div.querySelector('.bubble').appendChild(quote);
+      }
+      if (m.image) {
+        var img = document.createElement('img');
+        img.src = m.image; // 相对路径（同源）
+        img.alt = '图片';
+        img.loading = 'lazy';
+        img.title = '点击复制图片';
+        img.addEventListener('click', function () { copyImage(m.image); });
+        img.addEventListener('error', function () { this.style.display = 'none'; });
+        div.querySelector('.bubble').appendChild(img);
+      }
+      if (m.file) {
+        var fa = document.createElement('a');
+        fa.className = 'chat-file';
+        fa.href = m.file.url;
+        fa.download = m.file.name;
+        fa.title = '点击下载';
+        var ficon = document.createElement('span');
+        ficon.className = 'chat-file-icon';
+        ficon.textContent = m.file.kind === 'folder' ? '🗂️' : m.file.kind === 'archive' ? '🗜️' : '📄';
+        var fname = document.createElement('span');
+        fname.className = 'chat-file-name';
+        fname.textContent = m.file.name;
+        var fdl = document.createElement('span');
+        fdl.className = 'chat-file-dl';
+        fdl.textContent = '下载';
+        fa.appendChild(ficon); fa.appendChild(fname); fa.appendChild(fdl);
+        div.querySelector('.bubble').appendChild(fa);
+      }
+      if (m.text) {
+        var txt = document.createElement('div');
+        txt.textContent = m.text;
+        div.querySelector('.bubble').appendChild(txt);
+      }
+      var copyBtn = div.querySelector('.copy');
+      if (copyBtn) copyBtn.addEventListener('click', function () {
+        copyText(m.text || '');
+        this.textContent = '已复制 ✓';
+        var self = this;
+        setTimeout(function () { self.textContent = '复制'; }, 1500);
+      });
+      var saveBtn = div.querySelector('.save');
+      if (saveBtn) saveBtn.addEventListener('click', function () {
+        saveText(m.text || '');
+        this.textContent = '已保存 ✓';
+        var self = this;
+        setTimeout(function () { self.textContent = '保存'; }, 1500);
+      });
+      div.querySelector('.reply').addEventListener('click', function () {
+        replyTo = m;
+        var preview = m.text || (m.image ? '[图片]' : '[文件] ' + ((m.file && m.file.name) || ''));
+        replyText.textContent = '回复 ' + m.nick + '：' + preview;
+        replyBar.style.display = 'flex';
+        input.focus();
+      });
+      list.appendChild(div);
+      applySearch();
+    }
+
+    cancelReply.addEventListener('click', function () {
+      replyTo = null;
+      replyBar.style.display = 'none';
+    });
+
+    function applySearch() {
+      var q = searchBox.value.trim().toLowerCase();
+      list.querySelectorAll('.msg').forEach(function (item) {
+        item.style.display = !q || (item.dataset.search || '').indexOf(q) >= 0 ? '' : 'none';
+      });
+    }
+    searchBox.addEventListener('input', applySearch);
+
+    function clientId() {
+      return window.crypto && window.crypto.randomUUID
+        ? window.crypto.randomUUID()
+        : Date.now() + '_' + Math.random().toString(36).slice(2, 12);
+    }
+
+    // 文字保存为 txt 下载
+    function saveText(txt) {
+      var blob = new Blob([txt || ''], { type: 'text/plain;charset=utf-8' });
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = '消息-' + Date.now() + '.txt';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 100);
+    }
+
+    // 图片点击复制（http 环境 clipboard 受限，降级提示）
+    function copyImage(url) {
+      fetch(url).then(function (r) { return r.blob(); }).then(function (blob) {
+        if (navigator.clipboard && window.ClipboardItem) {
+          return navigator.clipboard.write([new ClipboardItem({ [blob.type || 'image/png']: blob })]).then(function () {
+            alert('图片已复制');
+          });
+        }
+        throw new Error('no-clipboard');
+      }).catch(function () {
+        alert('此环境不支持直接复制图片，长按/右键可保存图片');
+      });
+    }
+
+    // 文件选择（图片、文本或压缩文件）→ 上传 → 发送
+    attachBtn.addEventListener('click', function () { attachMenu.hidden = !attachMenu.hidden; });
+    chooseFileBtn.addEventListener('click', function () { attachMenu.hidden = true; fileInput.click(); });
+    chooseFolderBtn.addEventListener('click', function () { attachMenu.hidden = true; folderInput.click(); });
+    fileInput.addEventListener('change', function () {
+      var files = Array.from(fileInput.files || []);
+      fileInput.value = '';
+      files.reduce(function (chain, file) { return chain.then(function () { return doUpload(file); }); }, Promise.resolve());
+    });
+
+    var folderInput = document.getElementById('folderInput');
+    folderInput.addEventListener('change', function () {
+      var files = Array.from(folderInput.files || []);
+      folderInput.value = '';
+      if (!files.length) return;
+      if (files.length > 500) { alert('文件夹最多包含 500 个文件'); return; }
+      var total = files.reduce(function (sum, file) { return sum + file.size; }, 0);
+      if (total > 200 * 1024 * 1024) { alert('文件夹原始内容不能超过 200MB'); return; }
+      var zip = new JSZip();
+      files.forEach(function (file) { zip.file(file.relativePath || file.webkitRelativePath || file.name, file); });
+      var root = (files[0].relativePath || files[0].webkitRelativePath || '文件夹').split('/')[0] || '文件夹';
+      sendBtn.disabled = true;
+      zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } })
+        .then(function (blob) {
+          if (blob.size > 200 * 1024 * 1024) throw new Error('压缩后文件超过 200MB');
+          return doUpload(new File([blob], root + '.zip', { type: 'application/zip' }), true);
+        })
+        .catch(function (e) { alert(e.message || '文件夹压缩失败'); })
+        .finally(function () { sendBtn.disabled = false; });
+    });
+
+    function collectEntryFiles(entry, output, parentPath) {
+      parentPath = parentPath || '';
+      if (entry.isFile) {
+        return new Promise(function (resolve, reject) {
+          entry.file(function (file) {
+            Object.defineProperty(file, 'relativePath', { value: parentPath + entry.name, enumerable: false });
+            output.push(file);
+            resolve();
+          }, reject);
+        });
+      }
+      if (!entry.isDirectory) return Promise.resolve();
+      var reader = entry.createReader();
+      function readBatch() {
+        return new Promise(function (resolve, reject) { reader.readEntries(resolve, reject); }).then(function (entries) {
+          if (!entries.length) return;
+          return entries.reduce(function (chain, child) {
+            return chain.then(function () { return collectEntryFiles(child, output, parentPath + entry.name + '/'); });
+          }, Promise.resolve()).then(readBatch);
+        });
+      }
+      return readBatch();
+    }
+
+    document.body.addEventListener('dragover', function (e) {
+      e.preventDefault();
+      document.body.classList.add('dragging-file');
+    });
+    document.body.addEventListener('dragleave', function (e) {
+      if (e.target === document.body) document.body.classList.remove('dragging-file');
+    });
+    document.body.addEventListener('drop', function (e) {
+      e.preventDefault();
+      document.body.classList.remove('dragging-file');
+      var entries = Array.from(e.dataTransfer.items || []).map(function (item) {
+        return item.webkitGetAsEntry && item.webkitGetAsEntry();
+      }).filter(Boolean);
+      if (entries.some(function (entry) { return entry.isDirectory; })) {
+        var files = [];
+        entries.reduce(function (chain, entry) {
+          return chain.then(function () { return collectEntryFiles(entry, files); });
+        }, Promise.resolve()).then(function () {
+          if (files.length > 500) throw new Error('文件夹最多包含 500 个文件');
+          var total = files.reduce(function (sum, file) { return sum + file.size; }, 0);
+          if (total > 200 * 1024 * 1024) throw new Error('文件夹原始内容不能超过 200MB');
+          var zip = new JSZip();
+          files.forEach(function (file) { zip.file(file.relativePath || file.webkitRelativePath || file.name, file); });
+          var root = (files[0].relativePath || files[0].webkitRelativePath || '文件夹').split('/')[0] || '文件夹';
+          return zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } })
+            .then(function (blob) {
+              if (blob.size > 200 * 1024 * 1024) throw new Error('压缩后文件超过 200MB');
+              return doUpload(new File([blob], root + '.zip', { type: 'application/zip' }), true);
+            });
+        }).catch(function (error) { alert(error.message || '文件夹处理失败'); });
+      } else {
+        Array.from(e.dataTransfer.files || []).reduce(function (chain, file) {
+          return chain.then(function () { return doUpload(file); });
+        }, Promise.resolve()).catch(function () { alert('文件上传失败，请检查连接'); });
+      }
+    });
+
+    function doUpload(file, folder) {
+      var image = /^image\//.test(file.type || '');
+      var archive = /\.(zip|7z|rar|tar|gz|tgz|bz2|xz)$/i.test(file.name || '');
+      var imageByName = /\.(png|jpe?g|gif|webp|bmp|tiff?|ico|avif|hei[cf])$/i.test(file.name || '');
+      image = image || imageByName;
+      if (image && file.size > 5 * 1024 * 1024) { alert('图片不能超过 5MB'); return Promise.resolve(); }
+      if (!image && !archive && file.size > 1024 * 1024) { alert('文本文件不能超过 1MB'); return Promise.resolve(); }
+      if (archive && file.size > 200 * 1024 * 1024) { alert('压缩文件不能超过 200MB'); return Promise.resolve(); }
+      return fetch('/api/upload?name=' + encodeURIComponent(file.name || '') + (folder ? '&folder=1' : ''), {
+        method: 'POST',
+        headers: { 'Content-Type': file.type || 'application/octet-stream' },
+        body: file,
+      }).then(function (r) { return r.json(); }).then(function (d) {
+        if (!d.ok || !d.url) { alert(d.error || '上传失败'); return; }
+        var payload = { clientId: clientId(), nick: nick, text: input.value.trim() };
+        if (replyTo) payload.replyTo = { id: replyTo.id };
+        if (d.kind !== 'image') payload.file = { url: d.url, name: d.name, kind: d.kind, size: d.size };
+        else payload.image = d.url;
+        return fetch('/api/msg', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }).then(function (r) { return r.json(); }).then(function (d2) {
+          if (d2.ok) {
+            input.value = '';
+            replyTo = null;
+            replyBar.style.display = 'none';
+            if (d2.msg) render(d2.msg);
+          }
+          else { alert(d2.error || '发送失败'); }
+        });
+      }).catch(function () { alert('文件上传失败，请检查连接'); });
+    }
+
+    // 聊天区粘贴：图片直接上传发送，文字补进输入框
+    var pageEl = document.body;
+    pageEl.addEventListener('paste', function (e) {
+      var items = e.clipboardData && e.clipboardData.items;
+      if (!items) return;
+      for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        if (it.type && it.type.indexOf('image/') === 0) {
+          var f = it.getAsFile();
+          if (f) { e.preventDefault(); doUpload(f); return; }
+        }
+      }
+      if (document.activeElement !== input) {
+        var t = e.clipboardData.getData('text/plain');
+        if (t) { e.preventDefault(); input.value += t; input.focus(); }
+      }
+    });
+
+    function send() {
+      var text = input.value.trim();
+      if (!text) return;
+      sendBtn.disabled = true;
+      fetch('/api/msg', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientId: clientId(),
+          nick: nick,
+          text: text,
+          replyTo: replyTo ? { id: replyTo.id } : undefined,
+        }),
+      }).then(function (r) { return r.json(); }).then(function (d) {
+        if (d.ok) {
+          input.value = '';
+          replyTo = null;
+          replyBar.style.display = 'none';
+          if (d.msg) render(d.msg); // 立即显示自己的消息
+        }
+        else { alert(d.error || '发送失败'); }
+      }).catch(function () { alert('发送失败，请检查连接'); })
+        .finally(function () { sendBtn.disabled = false; });
+    }
+    sendBtn.addEventListener('click', send);
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+    input.focus();
+  })();
+</script>
+</body>
+</html>

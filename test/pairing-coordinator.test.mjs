@@ -1,0 +1,3 @@
+import test from 'node:test'; import assert from 'node:assert/strict'; import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url); const { createPairingCoordinator } = require('../core/pairing-coordinator');
+test('配对协调器完成目标校验、一次性确认和授权生成', () => { const c = createPairingCoordinator({ now: () => 1000 }); const r = c.request('a', 'b'); assert.equal(c.confirm(r.sessionId, 'x', r.code, 'sha256:b').reasonCode, 'RECIPIENT_MISMATCH'); const ok = c.confirm(r.sessionId, 'b', r.code, 'sha256:b'); assert.equal(ok.ok, true); assert.equal(ok.authorization.deviceId, 'b'); assert.equal(c.pendingCount(), 0); assert.equal(c.confirm(r.sessionId, 'b', r.code, 'sha256:b').ok, false); });

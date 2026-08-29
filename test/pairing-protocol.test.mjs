@@ -1,0 +1,4 @@
+import test from 'node:test'; import assert from 'node:assert/strict'; import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url); const { createPairingSession } = require('../core/pairing'); const p = require('../core/pairing-protocol');
+test('配对消息带版本、方向和唯一 ID，拒绝错误接收方', () => { const s = createPairingSession('a', 'b', 100); const m = p.createPairMessage('pair_request', s); assert.equal(p.validatePairMessage(m, 'b').valid, true); assert.equal(p.validatePairMessage(m, 'c').reasonCode, 'RECIPIENT_MISMATCH'); });
+test('授权会话绑定设备并自动过期', () => { const s = createPairingSession('a', 'b', 100); const a = p.createAuthorization(s, 'b', 100); assert.equal(p.isAuthorizationValid(a, 'b', 101), true); assert.equal(p.isAuthorizationValid(a, 'c', 101), false); assert.equal(p.isAuthorizationValid(a, 'b', a.expiresAt), false); });

@@ -1,0 +1,96 @@
+{
+  "name": "inner-net",
+  "productName": "InnerNet 内网共享",
+  "version": "2.0.0",
+  "description": "局域网 SMB 文件夹共享（Windows 端）与 Mac 端聚合挂载 + 群聊",
+  "main": "electron/main.js",
+  "author": "brz",
+  "license": "MIT",
+  "packageManager": "npm@11.17.0",
+  "engines": {
+    "node": ">=24.19.0 <25",
+    "npm": ">=11.7.0 <12"
+  },
+  "volta": {
+    "node": "24.19.0",
+    "npm": "11.17.0"
+  },
+  "scripts": {
+    "runtime:check": "node scripts/check-runtime.js",
+    "preinstall": "node scripts/check-runtime.js",
+    "predev": "node scripts/check-runtime.js",
+    "precheck": "node scripts/check-runtime.js",
+    "electron:ensure": "node scripts/ensure-electron.js",
+    "dev": "npm run electron:ensure && concurrently -k \"vite\" \"wait-on tcp:127.0.0.1:6300 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:6300 electron .\"",
+    "build": "vite build",
+    "build:win": "vite build && electron-builder --win",
+    "build:portable": "vite build && electron-builder --win && node scripts/pack-portable.js",
+    "build:mac": "vite build && electron-builder --mac",
+    "lint": "eslint . --ext .js,.jsx",
+    "test": "node --test",
+    "check": "npm run lint && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@vitejs/plugin-react": "^6.1.0",
+    "concurrently": "^10.0.5",
+    "cross-env": "^10.1.0",
+    "electron": "44.0.0",
+    "electron-builder": "^26.15.3",
+    "eslint": "^9.17.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "vite": "^8.2.2",
+    "wait-on": "^9.1.0"
+  },
+  "allowScripts": {
+    "electron@44.0.0": true,
+    "electron-builder@26.15.3": true,
+    "electron-winstaller@5.4.0": true,
+    "fsevents@2.3.3": true
+  },
+  "build": {
+    "appId": "cn.brz.innernet",
+    "productName": "InnerNet 内网共享",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "artifactName": "InnerNet-${version}-${arch}.${ext}",
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "InnerNet",
+      "artifactName": "InnerNet-Setup-${version}.${ext}"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "build/icon.png",
+      "category": "public.app-category.utilities"
+    }
+  },
+  "dependencies": {
+    "jszip": "^3.10.1"
+  }
+}

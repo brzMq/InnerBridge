@@ -167,6 +167,7 @@ function AddShareForm({ sys, onDone, onCancel }) {
         <label>
           密码
           <input
+            type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder={unified ? '当前 Windows 登录密码（必填）' : '留空自动生成'}

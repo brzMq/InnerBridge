@@ -149,13 +149,13 @@ function AddShareForm({ sys, onDone, onCancel }) {
       {sys.platform === 'win32' && (
         <label style={{ flexDirection: 'row', alignItems: 'center', gap: 8, fontSize: 12.5, color: 'var(--text)' }}>
           <input type="checkbox" checked={unified} onChange={(e) => toggleUnified(e.target.checked)} />
-          <span>统一账号模式（使用当前 Windows 登录账号：{sys.username || '?'}，所有共享共用）</span>
+          <span>专用本地账号模式（推荐：所有共享共用本地账号 shareuser）</span>
         </label>
       )}
       {unified ? (
         <label>
           账号（统一账号）
-          <input value={account} readOnly placeholder={sys.username || ''} />
+          <input value={account || 'shareuser'} onChange={(e) => setAccount(e.target.value)} placeholder="shareuser" />
         </label>
       ) : (
         <label>
@@ -175,7 +175,7 @@ function AddShareForm({ sys, onDone, onCancel }) {
       </div>
       <p className="hint">
         {unified
-          ? '统一账号模式：所有共享共用当前 Windows 登录账号，不新建账号、删除时不删登录账号。请填写该账号的登录密码（Mac 端挂载用）。'
+          ? '专用本地账号模式：推荐使用 shareuser 等本地账号，避免 Microsoft 联机账号无法进行 SMB 网络认证。所有共享共用该账号，密码用于 Mac 端挂载。'
           : '账号密码留空则自动生成。已存在的账号会直接复用并授权。'}
       </p>
       {err && <p className="error">{err}</p>}

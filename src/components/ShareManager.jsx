@@ -35,7 +35,7 @@ async function copyText(text) {
 
 function Modal({ title, onClose, children }) {
   return (
-    <div className="modal-mask" onClick={onClose}>
+    <div className="modal-mask">
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <h3>{title}</h3>
@@ -112,7 +112,7 @@ function AddShareForm({ sys, onDone, onCancel }) {
       await window.api.shares.add({
         dirPath,
         shareName,
-        account: unified ? undefined : (account || undefined),
+        account: (account || 'shareuser').trim(),
         password: password || undefined,
         unified,
       });

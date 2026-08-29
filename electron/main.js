@@ -206,6 +206,7 @@ function isAdmin() {
 // ---------- Windows 共享命令 ----------
 
 /** 建本地账号（已存在则跳过） */
+function verifyUserCredentials(account, password) { const name = String(account || '').trim(); const pwd = String(password || ''); if (!name || !pwd) throw new Error('请输入已存在的本地 Windows 用户名和密码'); const list = runCmd('net', ['user']); if (!list.toLowerCase().includes(name.toLowerCase())) throw new Error(`Windows 本地用户不存在：${name}，请先在系统中创建用户`); return name; }
 function ensureUser(account, password) {
   const list = runCmd('net', ['user']);
   if (new RegExp(`^${account}\\b`, 'im').test(list)) return false;
@@ -733,18 +734,9 @@ function registerIpc() {
     let finalAccount;
     let finalPassword;
     let autoAccount = false;
-    if (isUnified) {
-      finalAccount = String(account || 'shareuser').trim();
-      finalPassword = (password || '').trim();
-      if (!finalPassword) throw new Error('专用本地账号模式需要填写账号密码');
-      const createdUser = ensureUser(finalAccount, finalPassword);
-      autoAccount = createdUser
-    } else {
-      finalAccount = account || genAccount();
-      finalPassword = password || genPassword();
-      const createdUser = ensureUser(finalAccount, finalPassword);
-      autoAccount = createdUser;
-    }
+    finalAccount = String(account || '').trim();
+    finalPassword = String(password || '').trim();
+    verifyUserCredentials(finalAccount, finalPassword);
     let grantWarnings = [];
     try {
       grantWarnings = grantDir(dirPath, finalAccount);

@@ -552,27 +552,28 @@ function mountOne(m, home) {
 function unmountPoint(mp) {
   if (IS_MAC) {
     const removeEmptyMountPoint = () => {
-      if (!mp || path.parse(mp).root === mp) return false;
+      if (!mp || path.parse(mp).root === mp) return { mountPointRemoved: false, mountPointRemovalReason: 'invalid' };
       try {
         fs.rmdirSync(mp); // 非递归：只有真正空目录才会删除，用户文件绝不会被清理
-        return true;
+        return { mountPointRemoved: true, mountPointRemovalReason: 'removed' };
       } catch (e) {
-        if (e && ['ENOENT', 'ENOTEMPTY', 'EEXIST', 'EBUSY'].includes(e.code)) return false;
+        if (e && e.code === 'ENOENT') return { mountPointRemoved: false, mountPointRemovalReason: 'missing' };
+        if (e && ['ENOTEMPTY', 'EEXIST', 'EBUSY'].includes(e.code)) return { mountPointRemoved: false, mountPointRemovalReason: 'not-empty' };
         throw e;
       }
     };
     try {
       runCmd('umount', [mp]);
-      return { ok: true, mountPointRemoved: removeEmptyMountPoint() };
+      return { ok: true, ...removeEmptyMountPoint() };
     } catch (e1) {
       try {
         runCmd('diskutil', ['unmount', 'force', mp]);
-        return { ok: true, mountPointRemoved: removeEmptyMountPoint() };
+        return { ok: true, ...removeEmptyMountPoint() };
       } catch (e2) {
         // 未挂载时给友好提示，不抛错
         const msg = String(e1.message || e1) + ' ' + String(e2.message || e2);
         if (/Unable to find disk|not currently mounted|not mounted|No such file/i.test(msg)) {
-          return { ok: false, reason: 'not-mounted', mountPointRemoved: removeEmptyMountPoint() };
+          return { ok: false, reason: 'not-mounted', ...removeEmptyMountPoint() };
         }
         throw new Error(msg.trim());
       }

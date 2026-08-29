@@ -16,13 +16,42 @@ function Modal({ title, onClose, children }) {
 
 const DEFAULT_HOST = '192.168.5.50';
 
-function SshSyncPanel({ onImported }) {
-  const [keyInfo, setKeyInfo] = useState(null);
+const newId = () =>
+  crypto.randomUUID
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+// 挂载目录清理结果文案：目录非空时必须说清楚，避免用户以为残留文件已被删掉
+function mountCleanupText(r) {
+  if (r?.mountPointRemovalReason === 'not-empty') return '，挂载目录非空已保留（请手动清理）';
+  if (r?.mountPointRemoved) return '，挂载目录已清理';
+  return '';
+}
+
+// 按「主机 + 共享名」合并清单：保留本机已填的口令和挂载点，其他主机的记录不受影响。
+// 对端离线或清单缺项时，已有记录不会被清空 —— SMB 密码只存在本机，不会从网络回来。
+function mergeMounts(existing, targetHost, incoming) {
+  const others = existing.filter((m) => m.host !== targetHost);
+  const previous = new Map(
+    existing.filter((m) => m.host === targetHost).map((m) => [m.shareName, m])
+  );
+  const merged = incoming.map((x) => {
+    const prev = previous.get(x.shareName);
+    return {
+      id: prev?.id || newId(),
+      host: targetHost,
+      shareName: x.shareName,
+      account: x.account || 'share',
+      password: prev?.password || '',
+      mountPoint: prev?.mountPoint || '',
+    };
+  });
+  return [...others, ...merged];
+}
+
+function ApiSyncPanel({ onImported }) {
   const [host, setHost] = useState(DEFAULT_HOST);
-  const [user, setUser] = useState('brz');
-  const [port, setPort] = useState('2222');
   const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [msg, setMsg] = useState(null);
 
   const show = (text, ok = true) => {
@@ -30,38 +59,20 @@ function SshSyncPanel({ onImported }) {
     setTimeout(() => setMsg(null), 4000);
   };
 
-  useEffect(() => {
-    window.api.ssh
-      .key()
-      .then(setKeyInfo)
-      .catch((e) => show(String(e.message || e), false));
-  }, []);
-
-  const copyKey = async () => {
-    if (!keyInfo) return;
-    try {
-      await navigator.clipboard.writeText(keyInfo.pub);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      show('复制失败，请手动选中复制', false);
-    }
-  };
-
   const pull = async () => {
     setBusy(true);
     try {
-      const list = await window.api.ssh.pull({ host: host.trim(), user: user.trim(), port: port.trim() });
-      const mounts = list.map((x) => ({
-        id: Math.random().toString(36).slice(2) + Date.now().toString(36),
-        host: host.trim(),
-        shareName: x.shareName,
-        account: x.account || 'share',
-        password: x.password || '',
-        mountPoint: '',
-      }));
-      await window.api.mounts.save(mounts);
-      show(`已从 ${host} 同步 ${mounts.length} 个共享`);
+      const target = host.trim();
+      const list = await window.api.shares.apiPull({ host: target });
+      if (!list.length) throw new Error('对端没有可同步的共享');
+      const next = mergeMounts(await window.api.mounts.list(), target, list);
+      await window.api.mounts.save(next);
+      const synced = next.filter((m) => m.host === target);
+      const needPassword = synced.filter((m) => !m.password).length;
+      show(
+        `已从 ${target} 同步 ${synced.length} 个共享` +
+          (needPassword ? `，其中 ${needPassword} 个需要先填写密码` : '')
+      );
       onImported && onImported();
     } catch (e) {
       show(String(e.message || e), false);
@@ -71,24 +82,15 @@ function SshSyncPanel({ onImported }) {
   };
 
   return (
-    <div className="ssh-panel">
-      <div className="ssh-head">
+    <div className="sync-panel">
+      <div className="sync-head">
         <div>
-          <h3>SSH 同步清单</h3>
-          <p className="sub">免密拉取 Windows 端的共享清单，一键填入挂载列表</p>
+          <h3>同步共享清单</h3>
+          <p className="sub">用已配对设备的 Ed25519 签名拉取 Windows 端共享清单</p>
         </div>
       </div>
-      <div className="ssh-body">
-        <div className="ssh-key-row">
-          <code className="ssh-pubkey">
-            {keyInfo ? keyInfo.pub : '正在生成/读取密钥…'}
-          </code>
-          <button className="btn small" onClick={copyKey} disabled={!keyInfo}>
-            {copied ? '已复制 ✓' : '复制公钥'}
-          </button>
-        </div>
-        <p className="hint">把上面公钥粘贴到 Windows 端「SSH 免密通道」里授权，一次即可</p>
-        <div className="ssh-form">
+      <div className="sync-body">
+        <div className="sync-form">
           <input
             className="text-input"
             placeholder="Windows 主机 IP"
@@ -96,24 +98,13 @@ function SshSyncPanel({ onImported }) {
             onChange={(e) => setHost(e.target.value)}
             style={{ width: 150 }}
           />
-          <input
-            className="text-input"
-            placeholder="Windows 用户名"
-            value={user}
-            onChange={(e) => setUser(e.target.value)}
-            style={{ width: 120 }}
-          />
-          <input
-            className="text-input"
-            placeholder="SSH 端口"
-            value={port}
-            onChange={(e) => setPort(e.target.value)}
-            style={{ width: 90 }}
-          />
-          <button className="btn small primary" onClick={pull} disabled={busy || !host.trim() || !user.trim()}>
+          <button className="btn small primary" onClick={pull} disabled={busy || !host.trim()}>
             {busy ? '同步中…' : '⌁ 拉取共享清单'}
           </button>
         </div>
+        <p className="hint">
+          请先在设备中心完成配对。清单只同步共享名和账号，SMB 密码保留在本机，不会经网络传输。
+        </p>
       </div>
       {msg && <div className={`toast ${msg.ok ? '' : 'err'}`}>{msg.text}</div>}
     </div>
@@ -123,7 +114,6 @@ function SshSyncPanel({ onImported }) {
 export default function MountManager({ sys }) {
   const [mounts, setMounts] = useState([]);
   const [mode, setMode] = useState('autofs'); // autofs(LaunchAgent) | manual
-  const [syncMode, setSyncMode] = useState(() => localStorage.getItem('innernet-sync-mode') || 'ssh');
   const [root, setRoot] = useState(''); // 聚合根目录
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -217,10 +207,11 @@ export default function MountManager({ sys }) {
     setBusy(true);
     try {
       const r = await window.api.mounts.unmount(resolvedMountPoint(m));
+      const cleanup = mountCleanupText(r);
       if (r && r.ok === false && r.reason === 'not-mounted') {
-        show(`「${m.shareName}」未挂载${r.mountPointRemoved ? '，空挂载目录已清理' : '，无需卸载'}`);
+        show(`「${m.shareName}」未挂载${cleanup || '，无需卸载'}`);
       } else {
-        show(`已卸载 ${m.shareName}${r?.mountPointRemoved ? '，空挂载目录已清理' : ''}`);
+        show(`已卸载 ${m.shareName}${cleanup}`);
       }
     } catch (e) {
       show(String(e.message || e), false);
@@ -235,9 +226,24 @@ export default function MountManager({ sys }) {
   };
 
   const removeMount = async (m) => {
-    const next = mounts.filter((x) => x.id !== m.id);
-    await saveAndReload(next);
-    show(`已移除 ${m.shareName}`);
+    setBusy(true);
+    try {
+      // 先卸载并清理空挂载目录，再删记录。目录非空时保留并提示，绝不递归删除。
+      // 对端离线导致卸载失败也不阻止移除记录，否则离线共享永远删不掉。
+      let cleanup = '';
+      try {
+        cleanup = mountCleanupText(await window.api.mounts.unmount(resolvedMountPoint(m)));
+      } catch {
+        cleanup = '';
+      }
+      const next = mounts.filter((x) => x.id !== m.id);
+      await saveAndReload(next);
+      show(`已移除 ${m.shareName}${cleanup}`);
+    } catch (e) {
+      show(String(e.message || e), false);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const importJSON = async (text) => {
@@ -248,20 +254,14 @@ export default function MountManager({ sys }) {
       throw new Error('JSON 解析失败');
     }
     const arr = Array.isArray(data) ? data : [data];
-    const next = arr
-      .filter((x) => x.shareName)
-      .map((x) => ({
-        id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2),
-        host: x.host || DEFAULT_HOST,
-        shareName: x.shareName,
-        account: x.account || 'share',
-        password: x.password || '',
-        mountPoint: '',
-      }));
-    if (!next.length) throw new Error('清单里没有有效的共享');
+    const incoming = arr.filter((x) => x.shareName);
+    if (!incoming.length) throw new Error('清单里没有有效的共享');
+    // 与 API 同步走同一套合并规则：已有记录的口令和挂载点不会被覆盖
+    const target = incoming[0].host || DEFAULT_HOST;
+    const next = mergeMounts(await window.api.mounts.list(), target, incoming);
     await saveAndReload(next);
     setShowImport(false);
-    show(`已导入 ${next.length} 个共享`);
+    show(`已导入 ${incoming.length} 个共享`);
   };
 
   return (
@@ -306,7 +306,7 @@ export default function MountManager({ sys }) {
         </div>
       </div>
 
-      <div className="sync-mode-switch"><span>清单同步方式</span><button className={`btn small ${syncMode === 'ssh' ? 'primary' : ''}`} onClick={() => { setSyncMode('ssh'); localStorage.setItem('innernet-sync-mode', 'ssh'); }}>SSH</button><button className={`btn small ${syncMode === 'api' ? 'primary' : ''}`} onClick={() => { setSyncMode('api'); localStorage.setItem('innernet-sync-mode', 'api'); }}>轻量 API</button></div>{syncMode === 'ssh' ? <SshSyncPanel onImported={refresh} /> : <div className="ssh-panel"><div className="ssh-head"><div><h3>轻量 API 同步清单</h3><p className="sub">使用已配对设备签名验证，不需要配置 sshd、防火墙或 authorized_keys。</p></div></div><div className="ssh-body"><p className="hint">请先在设备中心完成配对。轻量 API 通道正在接入，当前可切回 SSH 验证现有流程。</p></div></div>}
+      <ApiSyncPanel onImported={refresh} />
 
       {mounts.length === 0 ? (
         <div className="empty">

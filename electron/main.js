@@ -13,6 +13,7 @@ const { startChatServer } = require('./chat-server');
 const { storageStats, clearChatStorage } = require('./chat-storage');
 const ssh = require('./ssh');
 const { loadOrCreateIdentity } = require('../core/device-identity');
+const { createChallenge, signChallenge, verifyChallenge } = require('../core/light-auth');
 const { buildLocalDevice } = require('../core/capability-resolver');
 const { startDiscovery } = require('./discovery-service');
 const { createCredentialStore } = require('../core/credential-store');
@@ -185,6 +186,17 @@ const loadShares = () => loadJSON(SHARES_FILE, []);
 const saveShares = (s) => saveJSON(SHARES_FILE, s);
 const loadMounts = () => loadJSON(MOUNTS_FILE, []);
 const saveMounts = (m) => saveJSON(MOUNTS_FILE, m);
+
+/**
+ * 供局域网同步的共享清单：只保留挂载所需字段。
+ * 绝不外发 password 与 dirPath —— 轻量 API 走明文 HTTP，口令一旦出网等于明文泄露。
+ */
+const shareManifestForSync = () =>
+  loadShares().map((s) => ({
+    shareName: s.shareName,
+    account: s.account || '',
+    unified: Boolean(s.unified),
+  }));
 
 // 应用级设置（统一账号模式开关等）
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
@@ -901,6 +913,37 @@ function registerIpc() {
     }
   });
 
+  // ---- 轻量 API 同步共享清单 ----
+  ipcMain.handle('share:apiPull', async (_e, { host, port = 7890 } = {}) => {
+    if (!host) throw new Error('请输入 Windows 主机地址');
+    const identity = loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), {});
+    const base = `http://${host}:${Number(port)}`;
+    const post = async (url, payload) => {
+      const response = await globalThis.fetch(`${base}${url}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const body = await response.json().catch(() => ({}));
+      return { ok: response.ok, status: response.status, body };
+    };
+    // 1) 取挑战：对端只对已配对设备下发，未配对时这里就会拿到 403
+    const challenge = await post('/api/shares/challenge', { requesterId: identity.deviceId });
+    if (!challenge.ok || !challenge.body.challengeId) {
+      throw new Error(challenge.body.error || '获取认证挑战失败：请先在设备中心完成配对');
+    }
+    // 2) 用本机 Ed25519 私钥签名挑战，再换清单
+    const signed = signChallenge(
+      challenge.body,
+      fs.readFileSync(path.join(DATA_DIR, 'device.json.private.pem'), 'utf8')
+    );
+    const manifest = await post('/api/shares/manifest', { signed, requesterId: identity.deviceId });
+    if (!manifest.ok) throw new Error(manifest.body.error || '轻量 API 认证失败');
+    const shares = manifest.body.shares || [];
+    logEvent('info', 'sync', `已从 ${host} 拉取 ${shares.length} 个共享（轻量 API）`);
+    return shares;
+  });
+
   // ---- SSH 免密通道 ----
   // 脚本放 Temp 下无中文无空格的路径（PowerShell 5.1 按 GBK 解析无 BOM 的 UTF-8 脚本，
   // 中文注释+中文路径的组合会导致脚本解析失败）
@@ -1106,6 +1149,20 @@ let pairingServer = null;
 let transferServer = null;
 let trustedCredentialStore = null;
 
+/**
+ * 读取已配对设备持久化的 Ed25519 公钥；未配对、未存公钥或读取异常时返回 null。
+ * 配对由 Windows 侧 confirmIncoming 落库，Mac 侧 pairing:status 落库，两台机器各自独立。
+ */
+function trustedDevicePublicKey(deviceId) {
+  const id = String(deviceId || '');
+  if (!id || !trustedCredentialStore) return null;
+  try {
+    return JSON.parse(trustedCredentialStore.get(id) || '{}').publicKey || null;
+  } catch {
+    return null;
+  }
+}
+
 async function startTransfer() {
   if (transferServer) return transferServer;
   const configured = normalizeServicePorts(loadSettings().servicePorts || {});
@@ -1128,12 +1185,28 @@ async function startPairing() {
 function startChat() {
   // Windows 共享端才启动聊天服务
   if (!IS_WIN) return;
+  const identity = loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), { platform: PLATFORM, deviceName: os.hostname() });
   startChatServer(normalizeServicePorts(loadSettings().servicePorts || {}).chat, {
     file: CHAT_MESSAGES_FILE,
     imagesDir: CHAT_IMAGES_DIR,
     filesDir: CHAT_FILES_DIR,
     onEvent: (e) => logEvent(e.level, e.source, e.message),
-    shareManifest: () => loadShares(),
+    // 轻量认证：只给已配对设备下发挑战，避免向未知设备泄露本机 deviceId
+    issueShareChallenge: (requesterId) => {
+      if (!trustedDevicePublicKey(requesterId)) return null;
+      return createChallenge({ deviceId: identity.deviceId, requesterId });
+    },
+    verifyShareAuth: (signed, requesterId) => {
+      const publicKey = trustedDevicePublicKey(requesterId);
+      if (!publicKey) return false;
+      try {
+        return verifyChallenge(signed, crypto.createPublicKey(publicKey), { deviceId: identity.deviceId, requesterId });
+      } catch {
+        return false;
+      }
+    },
+    // 脱敏清单：只有 shareName / account / unified，口令不出网
+    shareManifest: shareManifestForSync,
   })
     .then((info) => {
       chatInfo = info;

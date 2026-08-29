@@ -4,6 +4,8 @@
  * - GET  /api/msg    消息历史
  * - POST /api/msg    发送消息 {nick, text}
  * - GET  /api/stream SSE 实时推送
+ * - POST /api/shares/challenge  轻量认证挑战（需注入 issueShareChallenge）
+ * - POST /api/shares/manifest   已签名的共享清单（需注入 verifyShareAuth）
  * 零依赖：Node 原生 http。消息持久化到 messages.jsonl，内存与文件均上限 MAX_MSG（1000）条。
  */
 const http = require('http');
@@ -256,9 +258,22 @@ function startChatServer(preferredPort = 7890, opts = {}) {
       return;
     }
 
-    // 轻量免密共享清单：仅由主进程注入已验证的签名校验器后开放
+    // 轻量免密共享清单：仅由主进程注入挑战签发器与签名校验器后开放
+    // 未注入时这两个路由不注册，请求落入 404 —— 避免未接线状态下裸奔。
+    if (req.method === 'POST' && url.pathname === '/api/shares/challenge' && typeof opts.issueShareChallenge === 'function') {
+      try {
+        const input = JSON.parse(await readBody(req));
+        const challenge = opts.issueShareChallenge(String(input.requesterId || ''));
+        if (!challenge) return sendJSON(res, 403, { error: '设备未获信任' });
+        return sendJSON(res, 200, challenge);
+      } catch { return sendJSON(res, 400, { error: '挑战请求无效' }); }
+    }
     if (req.method === 'POST' && url.pathname === '/api/shares/manifest' && typeof opts.verifyShareAuth === 'function') {
-      try { const input = JSON.parse(await readBody(req)); if (!opts.verifyShareAuth(input.signed, input.requesterId)) return sendJSON(res, 403, { error: '设备未获信任' }); return sendJSON(res, 200, { shares: typeof opts.shareManifest === 'function' ? opts.shareManifest() : [] }); } catch { return sendJSON(res, 400, { error: '认证请求无效' }); }
+      try {
+        const input = JSON.parse(await readBody(req));
+        if (!opts.verifyShareAuth(input.signed, String(input.requesterId || ''))) return sendJSON(res, 403, { error: '设备未获信任' });
+        return sendJSON(res, 200, { shares: typeof opts.shareManifest === 'function' ? opts.shareManifest() : [] });
+      } catch { return sendJSON(res, 400, { error: '认证请求无效' }); }
     }
 
     // 消息历史

@@ -974,6 +974,7 @@ function registerIpc() {
     }
   });
   ipcMain.handle('ssh:key', () => ssh.getOrCreateKey());
+  ipcMain.handle('share:apiPull', async (_e, { host, port = 7890, signed } = {}) => { if (!host) throw new Error('请输入 Windows 主机地址'); const response = await globalThis.fetch(`http://${host}:${Number(port)}/api/shares/manifest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ signed, requesterId: loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), {}).deviceId }) }); const body = await response.json(); if (!response.ok) throw new Error(body.error || '轻量 API 认证失败'); return body.shares || []; });
   ipcMain.handle('ssh:pull', (e, { host, user, port }) => {
     logEvent('info', 'ssh', `拉取共享清单: ${user}@${host}:${port || 22}`);
     try {
@@ -992,10 +993,7 @@ function registerIpc() {
   // ---- 挂载管理（macOS） ----
   ipcMain.handle('mount:list', () => loadMounts());
 
-  ipcMain.handle('mount:save', (e, mounts) => {
-    saveMounts(mounts);
-    return loadMounts();
-  });
+  ipcMain.handle('mount:save', (e, mounts) => { const next = Array.isArray(mounts) ? mounts : []; saveMounts(next); if (!next.length) { const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', 'cn.brz.innernet.automount.plist'); try { if (fs.existsSync(plist)) fs.unlinkSync(plist); } catch { /* ignore */ } } return loadMounts(); });
 
   ipcMain.handle('mount:applyAutofs', async (e, mounts) => {
     try {

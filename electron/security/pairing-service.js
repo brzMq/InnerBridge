@@ -1,6 +1,7 @@
 const http = require('http');
 const { createPairingCoordinator } = require('../../core/pairing-coordinator');
 const { createTransferChallenge, signTransferChallenge } = require('../../core/transfer');
+const { verifyRevocation } = require('../../core/revocation');
 const crypto = require('crypto');
 
 function json(res, status, body) {
@@ -14,7 +15,7 @@ function bodyOf(req) {
     req.on('end', () => resolve(text)); req.on('error', reject);
   });
 }
-function startPairingServer({ port = 7891, deviceId, identityFingerprint = '', privateKey, onRequest } = {}) {
+function startPairingServer({ port = 7891, deviceId, identityFingerprint = '', identityPublicKey = '', privateKey, onRequest, lookupTrustedPublicKey, onRevoked } = {}) {
   if (!deviceId) return Promise.reject(new Error('deviceId is required'));
   const pairing = createPairingCoordinator();
   const sessions = new Map();
@@ -34,11 +35,24 @@ function startPairingServer({ port = 7891, deviceId, identityFingerprint = '', p
       const item = sessions.get(decodeURIComponent(url.pathname.slice('/api/pair/status/'.length)));
       if (!item) return json(res, 404, { error: '配对会话不存在' });
       if (item.state === 'pending' && Date.now() >= item.expiresAt) item.state = 'expired';
-      return json(res, 200, { ok: true, sessionId: item.sessionId, state: item.state, expiresAt: item.expiresAt, ...(item.state === 'accepted' ? { identityFingerprint } : {}) });
+      return json(res, 200, { ok: true, sessionId: item.sessionId, state: item.state, expiresAt: item.expiresAt, ...(item.state === 'accepted' ? { identityFingerprint, identityPublicKey } : {}) });
     }
     if (req.method === 'POST' && url.pathname === '/api/pair/transfer-challenge') { try { const input = JSON.parse((await bodyOf(req)) || '{}'); const item = sessions.get(String(input.sessionId || '')); if (!item || item.state !== 'accepted' || item.fromDeviceId !== String(input.senderId || '') || !privateKey) return json(res, 403, { error: '配对会话未确认' }); const challenge = createTransferChallenge({ transferId: String(input.transferId || ''), senderId: item.fromDeviceId, receiverId: deviceId }); challenge.sessionId = item.sessionId; return json(res, 200, { ok: true, signedChallenge: signTransferChallenge(challenge, crypto.createPrivateKey(privateKey)) }); } catch (error) { return json(res, 400, { error: String(error.message || error) }); } }
     if (req.method === 'POST' && url.pathname === '/api/pair/confirm') {
       try { const input = JSON.parse((await bodyOf(req)) || '{}'); const result = confirm(String(input.sessionId || ''), String(input.code || '')); return json(res, result.ok ? 200 : 400, result); } catch (error) { return json(res, 400, { error: String(error.message || error) }); }
+    }
+    // 对端解除信任时主动送达。只认本机信任过的设备，并用配对时留存的公钥验签，
+    // 否则局域网内任何人都能伪造撤销把两端的配对拆掉。
+    if (req.method === 'POST' && url.pathname === '/api/pair/revoke') {
+      try {
+        const input = JSON.parse((await bodyOf(req)) || '{}');
+        const revokerId = String(input.signed?.revocation?.deviceId || '');
+        const publicKey = typeof lookupTrustedPublicKey === 'function' ? lookupTrustedPublicKey(revokerId) : null;
+        if (!publicKey) return json(res, 403, { error: '设备未获信任' });
+        if (!verifyRevocation(input.signed, publicKey, { targetDeviceId: deviceId })) return json(res, 403, { error: '撤销签名校验失败' });
+        const result = onRevoked ? onRevoked({ deviceId: revokerId, deviceName: String(input.signed.revocation?.deviceName || '') }) : { ok: true };
+        return json(res, 200, { ok: true, ...result });
+      } catch (error) { return json(res, 400, { error: String(error.message || error) }); }
     }
     return json(res, 404, { error: 'not found' });
   });

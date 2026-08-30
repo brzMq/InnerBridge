@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('api', {
     rejectIncoming: (data) => ipcRenderer.invoke('pairing:rejectIncoming', data),
     unpair: (data) => ipcRenderer.invoke('pairing:unpair', data),
     onIncoming: (callback) => { const listener = (_event, request) => callback(request); ipcRenderer.on('pairing:incoming', listener); return () => ipcRenderer.removeListener('pairing:incoming', listener); },
+    onRevoked: (callback) => { const listener = (_event, info) => callback(info); ipcRenderer.on('pairing:revoked', listener); return () => ipcRenderer.removeListener('pairing:revoked', listener); },
   },
   transfer: { info: () => ipcRenderer.invoke('transfer:info'), selectFile: () => ipcRenderer.invoke('transfer:selectFile'), requestChallenge: (input) => ipcRenderer.invoke('transfer:requestChallenge', input) },
   services: { health: () => ipcRenderer.invoke('services:health'), ports: () => ipcRenderer.invoke('services:ports'), setPorts: (ports) => ipcRenderer.invoke('services:setPorts', ports) },

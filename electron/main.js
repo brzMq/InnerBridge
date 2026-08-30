@@ -13,6 +13,7 @@ const { startChatServer } = require('./chat-server');
 const { storageStats, clearChatStorage } = require('./chat-storage');
 const { loadOrCreateIdentity } = require('../core/device-identity');
 const { createChallenge, signChallenge, verifyChallenge } = require('../core/light-auth');
+const { createRevocation, signRevocation } = require('../core/revocation');
 const { buildLocalDevice } = require('../core/capability-resolver');
 const { startDiscovery } = require('./discovery-service');
 const { createCredentialStore } = require('../core/credential-store');
@@ -604,7 +605,7 @@ function registerIpc() {
   const credentialStore = createCredentialStore(path.join(DATA_DIR, 'trusted-devices.json'), { safeStorage });
   trustedCredentialStore = credentialStore;
   ipcMain.handle('transfer:info', () => ({ port: transferServer?.port || null, localOnly: false, host: transferServer?.host || '0.0.0.0', root: TRANSFER_DIR }));
-  ipcMain.handle('transfer:requestChallenge', async (_e, input = {}) => { const host = String(input.host || ''); const port = Number(input.port || 7891); if (!host || !input.sessionId || !input.transferId || !input.senderId) return { ok: false, reasonCode: 'CHALLENGE_PARAMS_INVALID' }; try { const response = await globalThis.fetch(`http://${host}:${port}/api/pair/transfer-challenge`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: input.sessionId, senderId: input.senderId, transferId: input.transferId }) }); const body = await response.json(); return response.ok ? body : { ok: false, reasonCode: 'CHALLENGE_REJECTED' }; } catch { return { ok: false, reasonCode: 'CHALLENGE_UNREACHABLE' }; } });
+  ipcMain.handle('transfer:requestChallenge', async (_e, input = {}) => { const host = String(input.host || ''); const port = Number(input.port || 7891); if (!host || !input.sessionId || !input.transferId || !input.senderId) return { ok: false, reasonCode: 'CHALLENGE_PARAMS_INVALID' }; try { const response = await globalThis.fetch(`http://${host}:${port}/api/pair/transfer-challenge`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: input.sessionId, senderId: input.senderId, transferId: input.transferId }) }); const body = await response.json(); if (!response.ok) { demoteUntrusted(String(input.senderId || ''), '文件传输'); return { ok: false, reasonCode: 'CHALLENGE_REJECTED' }; } return body; } catch { return { ok: false, reasonCode: 'CHALLENGE_UNREACHABLE' }; } });
   ipcMain.handle('transfer:selectFile', async () => { const picked = await dialog.showOpenDialog({ properties: ['openFile', 'openDirectory'], title: '选择要传输的文件或文件夹' }); if (picked.canceled || !picked.filePaths[0]) return null; const file = picked.filePaths[0]; const stat = fs.statSync(file); if (stat.isDirectory()) return { path: file, name: path.basename(file), kind: 'folder', size: 0, sha256: null }; const sha256 = await hashFile(file); return { path: file, name: path.basename(file), kind: 'file', size: stat.size, sha256 }; });
   ipcMain.handle('services:ports', () => normalizeServicePorts(loadSettings().servicePorts || {}));
   ipcMain.handle('services:setPorts', (_e, ports = {}) => { const normalized = normalizeServicePorts(ports); const settings = loadSettings(); settings.servicePorts = normalized; saveSettings(settings); return { ok: true, ports: normalized, restartRequired: true }; });
@@ -617,15 +618,37 @@ function registerIpc() {
   ipcMain.handle('pairing:pending', () => pairingServer?.pending?.() || []);
   ipcMain.handle('pairing:confirmIncoming', (_e, { sessionId, code } = {}) => { const result = pairingServer?.confirm?.(sessionId, code) || { ok: false, reasonCode: 'PAIRING_SERVICE_UNAVAILABLE' }; if (result.ok) credentialStore.set(result.remoteDeviceId, JSON.stringify({ authorization: result.authorization, fingerprint: result.remoteFingerprint, publicKey: result.remotePublicKey || '' })); return result; });
   ipcMain.handle('pairing:rejectIncoming', (_e, { sessionId } = {}) => pairingServer?.reject?.(sessionId) || { ok: false, reasonCode: 'PAIRING_SERVICE_UNAVAILABLE' });
-  ipcMain.handle('pairing:unpair', (_e, { deviceId } = {}) => { if (!deviceId) return { ok: false, reasonCode: 'DEVICE_ID_REQUIRED' }; credentialStore.remove(String(deviceId)); return { ok: true }; });
+  ipcMain.handle('pairing:unpair', async (_e, remote = {}) => {
+    const deviceId = String(remote.deviceId || '');
+    if (!deviceId) return { ok: false, reasonCode: 'DEVICE_ID_REQUIRED' };
+    // 先删本机凭据，再通知对端；对端不在线时也要让本机立即生效
+    const local = revokeTrustLocal(deviceId, { deviceName: remote.deviceName || '' });
+    const host = String(remote.network?.preferredAddress || '');
+    const port = Number(remote.services?.pairing?.port || 7891);
+    if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+      return { ...local, delivered: false, reason: 'REMOTE_ENDPOINT_UNKNOWN' };
+    }
+    try {
+      const identity = loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), {});
+      const signed = signRevocation(
+        createRevocation({ deviceId: identity.deviceId, deviceName: identity.deviceName || os.hostname(), targetDeviceId: deviceId }),
+        fs.readFileSync(path.join(DATA_DIR, 'device.json.private.pem'), 'utf8')
+      );
+      const response = await globalThis.fetch(`http://${host}:${port}/api/pair/revoke`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ signed }) });
+      return { ...local, delivered: response.ok };
+    } catch {
+      // 送达失败不影响本机已解除；对端下次操作被拒时会走被动降级
+      return { ...local, delivered: false, reason: 'REMOTE_UNREACHABLE' };
+    }
+  });
   ipcMain.handle('pairing:request', async (_e, remote = {}) => {
     const identity = loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), { platform: PLATFORM, deviceName: os.hostname() });
     const host = String(remote.network?.preferredAddress || ''); const port = Number(remote.services?.pairing?.port || 7891);
     if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return { ok: false, reasonCode: 'REMOTE_ENDPOINT_INVALID' };
     try { const response = await globalThis.fetch(`http://${host}:${port}/api/pair/request`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fromDeviceId: identity.deviceId, fromDeviceName: identity.deviceName, fromFingerprint: identity.identity?.fingerprint || identity.deviceId, fromPublicKey: identity.identity?.publicKey || '', toDeviceId: String(remote.deviceId || '') }) }); const body = await response.json(); return response.ok ? { ok: true, ...body, host, port } : { ok: false, reasonCode: 'REMOTE_REJECTED' }; } catch { return { ok: false, reasonCode: 'REMOTE_UNREACHABLE' }; }
   });
-  ipcMain.handle('pairing:status', async (_e, session = {}) => { try { const response = await globalThis.fetch(`http://${session.host}:${session.port}/api/pair/status/${encodeURIComponent(session.sessionId)}`); const body = await response.json(); if (response.ok && body.state === 'accepted' && session.remoteDeviceId) credentialStore.set(session.remoteDeviceId, JSON.stringify({ authorization: body.authorization || null, fingerprint: body.identityFingerprint || '', pairedAt: new Date().toISOString() })); return response.ok ? { ok: true, ...body } : { ok: false, reasonCode: 'STATUS_UNAVAILABLE' }; } catch { return { ok: false, reasonCode: 'REMOTE_UNREACHABLE' }; } });
-  let discoveryService = null;
+  ipcMain.handle('pairing:status', async (_e, session = {}) => { try { const response = await globalThis.fetch(`http://${session.host}:${session.port}/api/pair/status/${encodeURIComponent(session.sessionId)}`); const body = await response.json(); // 发起方一侧也要存下对端公钥：否则对端主动送达的撤销凭据我们验不了签
+    if (response.ok && body.state === 'accepted' && session.remoteDeviceId) credentialStore.set(session.remoteDeviceId, JSON.stringify({ authorization: body.authorization || null, fingerprint: body.identityFingerprint || '', publicKey: body.identityPublicKey || '', pairedAt: new Date().toISOString() })); return response.ok ? { ok: true, ...body } : { ok: false, reasonCode: 'STATUS_UNAVAILABLE' }; } catch { return { ok: false, reasonCode: 'REMOTE_UNREACHABLE' }; } });
   ipcMain.handle('discovery:list', async () => {
     await startTransfer();
     const identity = loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), { platform: PLATFORM, platformVersion: os.release(), deviceType: IS_WIN ? 'desktop' : 'laptop', deviceName: os.hostname(), network: { addresses: getLocalIPs().map((n) => ({ address: n.ip, interfaceName: n.iface, family: 'IPv4' })) }, config: {}, services: { chat: IS_WIN, pairing: { port: 7891 }, transfer: { port: transferServer?.port || 49152 } }, trusted: false });
@@ -925,6 +948,8 @@ function registerIpc() {
     // 1) 取挑战：对端只对已配对设备下发，未配对时这里就会拿到 403
     const challenge = await post('/api/shares/challenge', { requesterId: identity.deviceId });
     if (!challenge.ok || !challenge.body.challengeId) {
+      // 403 表示对端已不信任本机（很可能是它单方面解除了配对而通知没送达）
+      if (challenge.status === 403) demoteUntrusted(deviceIdByHost(host), '共享清单同步');
       throw new Error(challenge.body.error || '获取认证挑战失败：请先在设备中心完成配对');
     }
     // 2) 用本机 Ed25519 私钥签名挑战，再换清单
@@ -933,7 +958,10 @@ function registerIpc() {
       fs.readFileSync(path.join(DATA_DIR, 'device.json.private.pem'), 'utf8')
     );
     const manifest = await post('/api/shares/manifest', { signed, requesterId: identity.deviceId });
-    if (!manifest.ok) throw new Error(manifest.body.error || '轻量 API 认证失败');
+    if (!manifest.ok) {
+      if (manifest.status === 403) demoteUntrusted(deviceIdByHost(host), '共享清单同步');
+      throw new Error(manifest.body.error || '轻量 API 认证失败');
+    }
     const shares = manifest.body.shares || [];
     logEvent('info', 'sync', `已从 ${host} 拉取 ${shares.length} 个共享（轻量 API）`);
     return shares;
@@ -1057,6 +1085,44 @@ let chatInfo = null;
 let pairingServer = null;
 let transferServer = null;
 let trustedCredentialStore = null;
+let discoveryService = null;
+
+/**
+ * 本机解除对某设备的信任，并立即把变更推给界面。
+ * reason=remote 表示是对端主动送达的撤销，界面据此区分「从未配对」和「被对方解除」。
+ */
+function revokeTrustLocal(deviceId, { reason = 'local', deviceName = '' } = {}) {
+  const id = String(deviceId || '');
+  if (!id) return { ok: false, reasonCode: 'DEVICE_ID_REQUIRED' };
+  trustedCredentialStore?.remove(id);
+  const who = deviceName || id;
+  logEvent('warn', 'pairing', reason === 'remote' ? `${who} 已解除与本机信任` : `已解除与 ${who} 的信任`);
+  mainWindow?.webContents.send('pairing:revoked', { deviceId: id, deviceName: who, reason });
+  return { ok: true, deviceId: id };
+}
+
+/** 按 IP 反查设备 ID，用于「只知道主机地址」的场景（如轻量 API 拉取被拒）被动降级 */
+function deviceIdByHost(host) {
+  const target = String(host || '').trim();
+  if (!target || !discoveryService) return '';
+  try {
+    return discoveryService.list().find((d) => d.network?.preferredAddress === target)?.deviceId || '';
+  } catch {
+    return '';
+  }
+}
+
+/** 对端已不信任本机时被动降级，避免界面长期停留在「已信任」的假象上 */
+function demoteUntrusted(deviceId, context = '') {
+  const id = String(deviceId || '');
+  if (!id || !trustedCredentialStore) return false;
+  let saved = null;
+  try { saved = JSON.parse(trustedCredentialStore.get(id) || '{}'); } catch { saved = null; }
+  if (!saved?.fingerprint) return false;
+  revokeTrustLocal(id, { reason: 'remote', deviceName: '' });
+  logEvent('warn', 'pairing', `对端已不信任本机${context ? `（${context}）` : ''}，已自动解除信任，需重新配对`);
+  return true;
+}
 
 /**
  * 读取已配对设备持久化的 Ed25519 公钥；未配对、未存公钥或读取异常时返回 null。
@@ -1084,8 +1150,10 @@ async function startPairing() {
   if (pairingServer) return pairingServer;
   const identity = loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), { platform: PLATFORM, platformVersion: os.release(), deviceType: IS_WIN ? 'desktop' : 'laptop', deviceName: os.hostname(), config: {}, services: { chat: IS_WIN, pairing: { port: 7891 } }, trusted: false });
   pairingServer = await startPairingServer({
-    port: normalizeServicePorts(loadSettings().servicePorts || {}).pairing, deviceId: identity.deviceId, identityFingerprint: identity.identity?.fingerprint || '', privateKey: fs.readFileSync(path.join(DATA_DIR, 'device.json.private.pem'), 'utf8'),
+    port: normalizeServicePorts(loadSettings().servicePorts || {}).pairing, deviceId: identity.deviceId, identityFingerprint: identity.identity?.fingerprint || '', identityPublicKey: identity.identity?.publicKey || '', privateKey: fs.readFileSync(path.join(DATA_DIR, 'device.json.private.pem'), 'utf8'),
     onRequest: (request) => { logEvent('info', 'pairing', `收到 ${request.fromDeviceName} 的配对请求`); mainWindow?.webContents.send('pairing:incoming', request); },
+    lookupTrustedPublicKey: (deviceId) => trustedDevicePublicKey(deviceId),
+    onRevoked: ({ deviceId, deviceName }) => revokeTrustLocal(deviceId, { reason: 'remote', deviceName }),
   });
   logEvent('info', 'pairing', `配对服务已启动：${pairingServer.port}`);
   return pairingServer;

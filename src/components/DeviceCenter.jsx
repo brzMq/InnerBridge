@@ -18,6 +18,12 @@ export default function DeviceCenter() {
   const [codes, setCodes] = useState({});
   const [notice, setNotice] = useState('');
   const [revokedBy, setRevokedBy] = useState({});
+  const [lanDevices, setLanDevices] = useState([]);
+  const [wolTargets, setWolTargets] = useState({});
+  const [localNics, setLocalNics] = useState([]);
+  const [wolEditing, setWolEditing] = useState(null);
+  const [wolDraft, setWolDraft] = useState({ targetMac: '', broadcast: '' });
+  const [waking, setWaking] = useState('');
 
   const refresh = () => {
     Promise.all([window.api.device?.info?.(), window.api.discovery?.list?.()])
@@ -34,7 +40,13 @@ export default function DeviceCenter() {
       })
       .catch(() => {});
     window.api.pairing?.pending?.().then(setIncoming).catch(() => {});
+    window.api.lan?.list?.().then(setLanDevices).catch(() => {});
+    window.api.wol?.list?.().then(setWolTargets).catch(() => {});
   };
+
+  useEffect(() => {
+    window.api.wol?.localNics?.().then(setLocalNics).catch(() => {});
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -120,6 +132,52 @@ export default function DeviceCenter() {
     refresh();
   };
 
+  const defaultBroadcast = (ip) => {
+    const parts = String(ip || '').split('.');
+    return parts.length === 4 ? `${parts[0]}.${parts[1]}.${parts[2]}.255` : '';
+  };
+
+  const openWolEdit = (device) => {
+    const saved = wolTargets[device.deviceId];
+    setWolDraft({
+      targetMac: saved?.targetMac || '',
+      broadcast: saved?.broadcastAddresses?.[0] || defaultBroadcast(device.network?.preferredAddress),
+    });
+    setWolEditing(device.deviceId);
+  };
+
+  const saveWol = async (device) => {
+    const result = await window.api.wol.saveTarget({
+      deviceId: device.deviceId,
+      targetMac: wolDraft.targetMac,
+      broadcastAddresses: wolDraft.broadcast ? [wolDraft.broadcast] : [],
+    });
+    if (result.ok) {
+      setNotice(`已保存「${device.deviceName}」的远程唤醒配置，可在它关机后尝试唤醒验证。`);
+      setWolEditing(null);
+      refresh();
+    } else {
+      setNotice(result.reasonCode === 'MAC_INVALID' ? 'MAC 地址格式不对，请检查后重试。' : '保存失败，请重试。');
+    }
+  };
+
+  const wakeDevice = async (device) => {
+    setWaking(device.deviceId);
+    try {
+      const result = await window.api.wol.send({ deviceId: device.deviceId });
+      setNotice(
+        result.online
+          ? `「${device.deviceName}」已唤醒上线。`
+          : `唤醒包已发送，但「${device.deviceName}」暂未上线。请确认：电源已插好、BIOS 已开启远程唤醒、使用有线网络。`
+      );
+      refresh();
+    } catch (err) {
+      setNotice(`唤醒失败：${err.message || '未知错误'}`);
+    } finally {
+      setWaking('');
+    }
+  };
+
   return (
     <section className="device-center">
       <div className="device-center-head">
@@ -191,6 +249,18 @@ export default function DeviceCenter() {
                     </span>
                   ))}
               </div>
+              {isLocal && localNics.length > 0 && (
+                <div className="nic-list">
+                  <small>本机网卡 MAC（供其他设备配置远程唤醒时复制）：</small>
+                  {localNics.map((n) => (
+                    <div key={`${n.name}-${n.mac}`} className="nic-row">
+                      <span>{n.name}（{n.address}）</span>
+                      <code className="mono">{n.mac}</code>
+                      <button className="btn small" onClick={() => navigator.clipboard?.writeText(n.mac)}>复制</button>
+                    </div>
+                  ))}
+                </div>
+              )}
               {!isLocal && d.trust?.state !== 'trusted' && d.trust?.state !== 'identity_changed' && (
                 <button className="btn small" onClick={() => requestPairing(d)}>
                   {revokedName ? '重新配对' : '发起配对'}
@@ -201,12 +271,87 @@ export default function DeviceCenter() {
                   解除配对
                 </button>
               )}
+              {!isLocal && d.trust?.state === 'trusted' && (() => {
+                const target = wolTargets[d.deviceId];
+                const wolReady = target?.state === 'verified' || target?.state === 'configured';
+                return (
+                  <div className="wol-block">
+                    {wolEditing === d.deviceId ? (
+                      <div className="wol-form">
+                        <label>
+                          目标 MAC
+                          <input
+                            value={wolDraft.targetMac}
+                            placeholder="AA-BB-CC-DD-EE-FF"
+                            onChange={(e) => setWolDraft({ ...wolDraft, targetMac: e.target.value })}
+                          />
+                        </label>
+                        <label>
+                          广播地址
+                          <input
+                            value={wolDraft.broadcast}
+                            placeholder="192.168.31.255"
+                            onChange={(e) => setWolDraft({ ...wolDraft, broadcast: e.target.value })}
+                          />
+                        </label>
+                        <p className="hint">MAC 可在目标设备「设备中心」的本机网卡区复制；BIOS 需开启远程唤醒（WOL），建议使用有线网络。</p>
+                        <div className="wol-actions">
+                          <button className="btn small primary" onClick={() => saveWol(d)}>保存</button>
+                          <button className="btn small ghost" onClick={() => setWolEditing(null)}>取消</button>
+                        </div>
+                      </div>
+                    ) : wolReady ? (
+                      <>
+                        <div className="wol-row">
+                          <small>
+                            远程唤醒（WOL）已配置
+                            {target.state === 'verified' ? ' · 已验证可唤醒' : ' · 尚未实际验证'}
+                          </small>
+                          <button className="btn small ghost" onClick={() => openWolEdit(d)}>修改</button>
+                        </div>
+                        {!d.presence?.online && (
+                          <button className="btn small" disabled={waking === d.deviceId} onClick={() => wakeDevice(d)}>
+                            {waking === d.deviceId ? '唤醒中…（最长等 30 秒）' : '唤醒设备'}
+                          </button>
+                        )}
+                      </>
+                    ) : (
+                      <button className="btn small ghost" onClick={() => openWolEdit(d)}>设置远程唤醒</button>
+                    )}
+                  </div>
+                );
+              })()}
               {d.trust?.state === 'identity_changed' && (
                 <span className="cap-off">为保护数据安全，请先解除配对后重新配对</span>
               )}
             </article>
           );
         })}
+      </div>
+
+      <div className="lan-devices">
+        <h3>局域网其他设备（未安装 InnerNet）</h3>
+        {lanDevices.length === 0 ? (
+          <p className="hint">
+            暂未发现。只有与本机产生过网络流量的设备才会出现在 ARP 表里（如访问过共享、被路由器广播过）。
+            本列表只读、不主动扫描网络，不会对任何设备发包。
+          </p>
+        ) : (
+          <table className="lan-table">
+            <thead>
+              <tr><th>IP 地址</th><th>MAC 地址</th><th>厂商（推断）</th></tr>
+            </thead>
+            <tbody>
+              {lanDevices.map((d) => (
+                <tr key={d.ip}>
+                  <td className="mono">{d.ip}</td>
+                  <td className="mono">{d.mac}</td>
+                  <td>{d.vendor || '未知'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
 
       {notice && <div className="chat-empty">{notice}</div>}

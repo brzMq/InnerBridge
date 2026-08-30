@@ -15,6 +15,9 @@ const { loadOrCreateIdentity } = require('../core/device-identity');
 const { createChallenge, signChallenge, verifyChallenge } = require('../core/light-auth');
 const { createRevocation, signRevocation } = require('../core/revocation');
 const { startSyncServer } = require('./sync-server');
+const { parseArpTable, mergeLanDevices } = require('../core/lan-devices');
+const wol = require('../core/wol');
+const { wake } = require('./wol-service');
 const { createSyncService } = require('./sync-service');
 const { buildLocalDevice } = require('../core/capability-resolver');
 const { startDiscovery } = require('./discovery-service');
@@ -1111,6 +1114,84 @@ function registerIpc() {
   ipcMain.handle('sync:pickDir', async () => {
     const picked = await dialog.showOpenDialog({ properties: ['openDirectory'], title: '选择同步目录' });
     return picked.canceled || !picked.filePaths[0] ? null : picked.filePaths[0];
+  });
+
+  // ---- 远程唤醒（WOL）----
+  // 目标配置按 deviceId 存本机（MAC/广播地址非机密，但只存发起端，不进发现广播）
+  const wolConfigFile = path.join(DATA_DIR, 'wol-targets.json');
+  const loadWolTargets = () => { try { return JSON.parse(fs.readFileSync(wolConfigFile, 'utf8')); } catch { return {}; } };
+  const saveWolTargets = (data) => { fs.mkdirSync(path.dirname(wolConfigFile), { recursive: true }); fs.writeFileSync(wolConfigFile, JSON.stringify(data, null, 2)); };
+
+  ipcMain.handle('wol:localNics', () => {
+    const nics = [];
+    for (const [name, infos] of Object.entries(os.networkInterfaces())) {
+      for (const info of infos || []) {
+        if (!info.mac || info.mac === '00:00:00:00:00:00' || info.internal) continue;
+        nics.push({ name, mac: info.mac, address: info.address, family: info.family });
+        break; // 同一网卡只取一条
+      }
+    }
+    return nics;
+  });
+  ipcMain.handle('wol:list', () => {
+    const targets = loadWolTargets();
+    return Object.fromEntries(Object.entries(targets).map(([id, c]) => [id, { ...c, state: wol.wolState(c).state }]));
+  });
+  ipcMain.handle('wol:saveTarget', (_e, { deviceId, targetMac, broadcastAddresses, verified } = {}) => {
+    const id = String(deviceId || '').trim();
+    if (!id) return { ok: false, reasonCode: 'DEVICE_ID_REQUIRED' };
+    const normalizedMac = wol.normalizeMac(targetMac);
+    if (!normalizedMac) return { ok: false, reasonCode: 'MAC_INVALID' };
+    const targets = loadWolTargets();
+    const previous = targets[id] || {};
+    targets[id] = {
+      targetMac: normalizedMac,
+      broadcastAddresses: (broadcastAddresses || []).map((a) => String(a).trim()).filter(Boolean),
+      configuredAt: previous.configuredAt || new Date().toISOString(),
+      verified: Boolean(verified ?? previous.verified),
+      verifiedAt: verified ? new Date().toISOString() : previous.verifiedAt || null,
+    };
+    saveWolTargets(targets);
+    logEvent('info', 'wol', `已保存设备 ${id} 的远程唤醒配置`);
+    return { ok: true, target: targets[id] };
+  });
+  ipcMain.handle('wol:removeTarget', (_e, { deviceId } = {}) => {
+    const targets = loadWolTargets();
+    delete targets[String(deviceId || '')];
+    saveWolTargets(targets);
+    return { ok: true };
+  });
+  ipcMain.handle('wol:send', async (_e, { deviceId } = {}) => {
+    const targets = loadWolTargets();
+    const config = targets[String(deviceId || '')];
+    if (!config) throw new Error('该设备尚未配置远程唤醒');
+    const device = discoveryService?.list().find((d) => d.deviceId === deviceId);
+    const peerIp = device?.network?.preferredAddress || '';
+    const broadcasts = config.broadcastAddresses.length ? config.broadcastAddresses : peerIp ? [wol.broadcastAddress(peerIp, 24)] : [];
+    logEvent('info', 'wol', `正在唤醒 ${device?.deviceName || deviceId}（广播 ${broadcasts.join(', ')}）`);
+    const result = await wake({ ...config, broadcastAddresses: broadcasts, address: peerIp, port: normalizeServicePorts(loadSettings().servicePorts || {}).chat }, { probeMs: 30000 });
+    if (result.online) {
+      targets[String(deviceId)] = { ...config, verified: true, verifiedAt: new Date().toISOString() };
+      saveWolTargets(targets);
+      logEvent('info', 'wol', `${device?.deviceName || deviceId} 已唤醒上线，WOL 配置标记为已验证`);
+    } else {
+      logEvent('warn', 'wol', `唤醒包已发送但 ${device?.deviceName || deviceId} 暂未上线，需用户检查电源/BIOS/网卡设置`);
+    }
+    return result;
+  });
+
+  // ---- 局域网设备（只读 ARP，不主动扫描） ----
+  let lanDevicesCache = [];
+  ipcMain.handle('lan:list', () => {
+    try {
+      const output = runCmd(IS_WIN ? 'arp' : '/usr/sbin/arp', ['-a'], { timeout: 3000 });
+      lanDevicesCache = mergeLanDevices(lanDevicesCache, parseArpTable(output));
+      const selfAddrs = new Set(getLocalIPs().map((a) => a.ip));
+      return lanDevicesCache.filter((d) => !selfAddrs.has(d.ip));
+    } catch (err) {
+      logEvent('warn', 'lan', `读取 ARP 表失败: ${err.message || err}`);
+      return lanDevicesCache;
+    }
   });
 
   // ---- 群聊 ----

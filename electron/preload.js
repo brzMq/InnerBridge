@@ -45,6 +45,16 @@ contextBridge.exposeInMainWorld('api', {
     set: (data) => ipcRenderer.invoke('host:set', data),
     remove: (data) => ipcRenderer.invoke('host:remove', data),
   },
+  lan: {
+    list: () => ipcRenderer.invoke('lan:list'),
+  },
+  wol: {
+    localNics: () => ipcRenderer.invoke('wol:localNics'),
+    list: () => ipcRenderer.invoke('wol:list'),
+    saveTarget: (data) => ipcRenderer.invoke('wol:saveTarget', data),
+    removeTarget: (data) => ipcRenderer.invoke('wol:removeTarget', data),
+    send: (data) => ipcRenderer.invoke('wol:send', data),
+  },
   sync: {
     state: () => ipcRenderer.invoke('sync:state'),
     setConfig: (patch) => ipcRenderer.invoke('sync:setConfig', patch),

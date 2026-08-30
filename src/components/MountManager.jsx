@@ -49,7 +49,7 @@ function mergeMounts(existing, targetHost, incoming) {
   return [...others, ...merged];
 }
 
-function ApiSyncPanel({ onImported }) {
+function ApiSyncPanel({ onImported, home = '', root = '' }) {
   const [host, setHost] = useState(DEFAULT_HOST);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
@@ -59,20 +59,40 @@ function ApiSyncPanel({ onImported }) {
     setTimeout(() => setMsg(null), 4000);
   };
 
+  const defaultMountPoint = (shareName) => {
+    const base = root || `${home}/Shared`;
+    return `${base}/${shareName}`;
+  };
+
   const pull = async () => {
     setBusy(true);
     try {
       const target = host.trim();
       const list = await window.api.shares.apiPull({ host: target });
       if (!list.length) throw new Error('对端没有可同步的共享');
-      const next = mergeMounts(await window.api.mounts.list(), target, list);
+      const existing = await window.api.mounts.list();
+      // 同步时把对端已删除的旧记录连同本地空目录一起清掉：
+      // 旧记录不再出现在新清单里 → 卸载并尝试清空挂载目录，目录非空则保留并提示
+      const oldForHost = existing.filter((m) => m.host === target);
+      const newShareNames = new Set(list.map((x) => x.shareName));
+      const stale = oldForHost.filter((m) => !newShareNames.has(m.shareName));
+      let cleaned = 0;
+      let keptBusy = 0;
+      for (const m of stale) {
+        try {
+          const r = await window.api.mounts.unmount(m.mountPoint || defaultMountPoint(m.shareName));
+          if (r?.mountPointRemoved) cleaned += 1;
+          else if (r?.mountPointRemovalReason === 'not-empty') keptBusy += 1;
+        } catch { /* 未挂载/离线/失败都放过，目录是否留下由用户处理 */ }
+      }
+      const next = mergeMounts(existing, target, list);
       await window.api.mounts.save(next);
       const synced = next.filter((m) => m.host === target);
       const needPassword = synced.filter((m) => !m.password).length;
-      show(
-        `已从 ${target} 同步 ${synced.length} 个共享` +
-          (needPassword ? `，其中 ${needPassword} 个需要先填写密码` : '')
-      );
+      const parts = [`已从 ${target} 同步 ${synced.length} 个共享`];
+      if (stale.length) parts.push(`清理 ${cleaned} 个失效记录${keptBusy ? `（${keptBusy} 个目录非空已保留）` : ''}`);
+      if (needPassword) parts.push(`${needPassword} 个需要填写密码`);
+      show(parts.join('，'));
       onImported && onImported();
     } catch (e) {
       show(String(e.message || e), false);
@@ -117,6 +137,7 @@ export default function MountManager({ sys }) {
   const [root, setRoot] = useState(''); // 聚合根目录
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [editing, setEditing] = useState(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
 
@@ -306,7 +327,7 @@ export default function MountManager({ sys }) {
         </div>
       </div>
 
-      <ApiSyncPanel onImported={refresh} />
+      <ApiSyncPanel onImported={refresh} home={home} root={root} />
 
       {mounts.length === 0 ? (
         <div className="empty">
@@ -326,6 +347,9 @@ export default function MountManager({ sys }) {
                     <p className="path mono">
                       smb://{m.account}@{m.host}/{m.shareName} → {resolvedMountPoint(m)}
                     </p>
+                    {!m.password && (
+                      <p className="hint warn-text">未设置密码，挂载与自动挂载会失败，点「编辑」填写</p>
+                    )}
                   </div>
                 </div>
                 <div className="mount-actions">
@@ -336,6 +360,9 @@ export default function MountManager({ sys }) {
                   )}
                   <button className="btn small" onClick={() => unmountOne(m)} disabled={busy}>
                     卸载
+                  </button>
+                  <button className="btn small" onClick={() => setEditing(m)} disabled={busy}>
+                    编辑
                   </button>
                   <button className="btn small danger" onClick={() => removeMount(m)} disabled={busy}>
                     移除
@@ -366,15 +393,29 @@ export default function MountManager({ sys }) {
 
       {showAdd && (
         <Modal title="添加共享" onClose={() => setShowAdd(false)}>
-          <AddMountForm
+          <MountForm
             root={root}
-            onDone={(m) => {
+            onSubmit={(m) => {
               setShowAdd(false);
-              const next = [...mounts, m];
-              saveAndReload(next);
+              saveAndReload([...mounts, m]);
               show(`已添加 ${m.shareName}`);
             }}
             onCancel={() => setShowAdd(false)}
+          />
+        </Modal>
+      )}
+
+      {editing && (
+        <Modal title="编辑共享" onClose={() => setEditing(null)}>
+          <MountForm
+            root={root}
+            initial={editing}
+            onSubmit={(m) => {
+              setEditing(null);
+              saveAndReload(mounts.map((x) => (x.id === m.id ? m : x)));
+              show(`已保存 ${m.shareName}`);
+            }}
+            onCancel={() => setEditing(null)}
           />
         </Modal>
       )}
@@ -390,22 +431,24 @@ export default function MountManager({ sys }) {
   );
 }
 
-function AddMountForm({ root, onDone, onCancel }) {
-  const [host, setHost] = useState(DEFAULT_HOST);
-  const [shareName, setShareName] = useState('');
-  const [account, setAccount] = useState('share');
-  const [password, setPassword] = useState('');
+function MountForm({ root, initial = null, onSubmit, onCancel }) {
+  const isEdit = Boolean(initial);
+  const [host, setHost] = useState(initial?.host || DEFAULT_HOST);
+  const [shareName, setShareName] = useState(initial?.shareName || '');
+  const [account, setAccount] = useState(initial?.account || 'share');
+  const [password, setPassword] = useState(initial?.password || '');
   const [err, setErr] = useState('');
 
   const submit = () => {
     if (!shareName.trim()) return setErr('请填写共享名');
-    onDone({
-      id: Math.random().toString(36).slice(2) + Date.now().toString(36),
-      host: host.trim() || DEFAULT_HOST,
+    if (!host.trim()) return setErr('请填写主机 IP');
+    onSubmit({
+      id: initial?.id || newId(),
+      host: host.trim(),
       shareName: shareName.trim(),
       account: account.trim() || 'share',
       password,
-      mountPoint: '',
+      mountPoint: initial?.mountPoint || '',
     });
   };
 
@@ -426,7 +469,7 @@ function AddMountForm({ root, onDone, onCancel }) {
         </label>
         <label>
           密码
-          <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="留空存钥匙串时再填" />
+          <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder={isEdit ? '留空保持原密码' : '留空挂载时再填'} />
         </label>
       </div>
       <p className="hint">
@@ -435,7 +478,7 @@ function AddMountForm({ root, onDone, onCancel }) {
       {err && <p className="error">{err}</p>}
       <div className="modal-foot">
         <button className="btn ghost" onClick={onCancel}>取消</button>
-        <button className="btn primary" onClick={submit}>添加</button>
+        <button className="btn primary" onClick={submit}>{isEdit ? '保存' : '添加'}</button>
       </div>
     </div>
   );

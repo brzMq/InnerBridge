@@ -157,6 +157,8 @@ export default function ShareManager({ sys }) {
   const [copyId, setCopyId] = useState(null);
   const [confirmTarget, setConfirmTarget] = useState(null);
   const [resetTarget, setResetTarget] = useState(null);
+  // 默认遮罩，点了眼睛后单独显示
+  const [revealedShares, setRevealedShares] = useState({});
   const [resetInput, setResetInput] = useState('');
   // 统一账号模式：密码同步 / 存量迁移 / 重置引导
   const [guideTarget, setGuideTarget] = useState(null);
@@ -333,7 +335,14 @@ export default function ShareManager({ sys }) {
                   <span className="k">账号</span>
                   <span className="v">{s.account}</span>
                   <span className="k">密码</span>
-                  <span className="v mono">{s.password}</span>
+                  <span className="v mono">{revealedShares[s.id] ? s.password : '••••••••'}</span>
+                  <button
+                    className="icon-btn"
+                    title={revealedShares[s.id] ? '隐藏密码' : '显示密码'}
+                    onClick={() => setRevealedShares((r) => ({ ...r, [s.id]: !r[s.id] }))}
+                  >
+                    {revealedShares[s.id] ? '🙈' : '👁'}
+                  </button>
                 </div>
                 <div className="creds-row">
                   <span className="k">地址</span>
@@ -342,7 +351,7 @@ export default function ShareManager({ sys }) {
               </div>
               <div className="card-actions">
                 <button className="btn small" onClick={() => copyConn(s)} disabled={busyId === s.id || globalBusy}>
-                  {copyId === s.id ? '已复制 ✓' : '复制连接信息'}
+                  {copyId === s.id ? '已复制 ✓' : '复制连接信息（含密码）'}
                 </button>
                 <button
                   className="btn small"

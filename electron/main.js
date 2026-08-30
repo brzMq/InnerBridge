@@ -604,6 +604,8 @@ function getLocalIPs() {
 function registerIpc() {
   const credentialStore = createCredentialStore(path.join(DATA_DIR, 'trusted-devices.json'), { safeStorage });
   trustedCredentialStore = credentialStore;
+  // 主机统一密码库：与配对凭据同一加密机制，独立文件便于备份/迁移
+  hostCredentialStore = createCredentialStore(path.join(DATA_DIR, 'host-credentials.json'), { safeStorage });
   ipcMain.handle('transfer:info', () => ({ port: transferServer?.port || null, localOnly: false, host: transferServer?.host || '0.0.0.0', root: TRANSFER_DIR }));
   ipcMain.handle('transfer:requestChallenge', async (_e, input = {}) => { const host = String(input.host || ''); const port = Number(input.port || 7891); if (!host || !input.sessionId || !input.transferId || !input.senderId) return { ok: false, reasonCode: 'CHALLENGE_PARAMS_INVALID' }; try { const response = await globalThis.fetch(`http://${host}:${port}/api/pair/transfer-challenge`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: input.sessionId, senderId: input.senderId, transferId: input.transferId }) }); const body = await response.json(); if (!response.ok) { demoteUntrusted(String(input.senderId || ''), '文件传输'); return { ok: false, reasonCode: 'CHALLENGE_REJECTED' }; } return body; } catch { return { ok: false, reasonCode: 'CHALLENGE_UNREACHABLE' }; } });
   ipcMain.handle('transfer:selectFile', async () => { const picked = await dialog.showOpenDialog({ properties: ['openFile', 'openDirectory'], title: '选择要传输的文件或文件夹' }); if (picked.canceled || !picked.filePaths[0]) return null; const file = picked.filePaths[0]; const stat = fs.statSync(file); if (stat.isDirectory()) return { path: file, name: path.basename(file), kind: 'folder', size: 0, sha256: null }; const sha256 = await hashFile(file); return { path: file, name: path.basename(file), kind: 'file', size: stat.size, sha256 }; });
@@ -978,10 +980,11 @@ function registerIpc() {
   ipcMain.handle('mount:applyAutofs', async (e, mounts) => {
     try {
       const home = os.homedir();
-      const normalized = (mounts || loadMounts()).map((m) => ({
-        ...m,
-        mountPoint: m.mountPoint || path.join(home, 'Shared', m.shareName),
-      }));
+      const normalized = (mounts || loadMounts()).map((m) => {
+        // 静态脚本里要把口令写进去，所以这里必须把主机密码解析出来
+        const withPassword = resolveMountPassword(m);
+        return { ...withPassword, mountPoint: withPassword.mountPoint || path.join(home, 'Shared', withPassword.shareName) };
+      });
       const body = applyAutofs(normalized);
       let mountOutput = '';
       try { mountOutput = runCmd('/sbin/mount', []); } catch { /* ignore status probe */ }
@@ -1004,7 +1007,8 @@ function registerIpc() {
   ipcMain.handle('mount:mountOne', (e, mount) => {
     try {
       const home = os.homedir();
-      const result = mountOne({ ...mount, password: mount.password || undefined }, home);
+      // 优先用共享自身的密码，没有则回退到主机密码（不修改原始记录）
+      const result = mountOne(resolveMountPassword(mount), home);
       if (result.alreadyMounted) {
         logEvent('info', 'mount', `「${mount.shareName}」已经挂载，无需重复操作`);
       } else {
@@ -1026,6 +1030,55 @@ function registerIpc() {
       logEvent('error', 'mount', `卸载 ${mountPoint} 失败: ${err.message || err}`);
       throw err;
     }
+  });
+
+  // ---- 主机账号（按 host 维护的 SMB 统一密码） ----
+  // 列表聚合：所有出现过的主机 + 各自是否已设统一密码与更新时间
+  ipcMain.handle('host:list', () => {
+    const map = new Map();
+    try {
+      for (const host of hostCredentialStore?.list() || []) {
+        if (!host) continue;
+        let saved = null;
+        try { saved = JSON.parse(hostCredentialStore.get(host) || '{}'); } catch { saved = null; }
+        map.set(host, { host, hasPassword: Boolean(saved.password), updatedAt: saved.updatedAt || null });
+      }
+    } catch { /* 损坏的存储不影响展示 */ }
+    for (const m of loadMounts()) {
+      if (!m.host) continue;
+      if (!map.has(m.host)) map.set(m.host, { host: m.host, hasPassword: false, updatedAt: null });
+    }
+    return [...map.values()].sort((a, b) => a.host.localeCompare(b.host));
+  });
+
+  // 设置/更新主机密码，并按用户选择把该主机的所有现有共享密码也覆盖上
+  ipcMain.handle('host:set', (_e, { host, password, propagateToShares = true } = {}) => {
+    const target = String(host || '').trim();
+    const pwd = String(password || '');
+    if (!target) return { ok: false, reasonCode: 'HOST_REQUIRED' };
+    if (!pwd) return { ok: false, reasonCode: 'PASSWORD_REQUIRED' };
+    hostCredentialStore.set(target, JSON.stringify({ password: pwd, updatedAt: new Date().toISOString() }));
+    let propagated = 0;
+    if (propagateToShares) {
+      const mounts = loadMounts();
+      const next = mounts.map((m) => {
+        if (m.host !== target) return m;
+        if (m.password === pwd) return m;
+        propagated += 1;
+        return { ...m, password: pwd };
+      });
+      if (propagated > 0) saveMounts(next);
+    }
+    logEvent('info', 'mount', `已为 ${target} 设置统一密码${propagated ? `，覆盖 ${propagated} 个共享` : ''}`);
+    return { ok: true, propagated };
+  });
+
+  ipcMain.handle('host:remove', (_e, { host } = {}) => {
+    const target = String(host || '').trim();
+    if (!target) return { ok: false, reasonCode: 'HOST_REQUIRED' };
+    hostCredentialStore.remove(target);
+    logEvent('info', 'mount', `已移除 ${target} 的统一密码`);
+    return { ok: true };
   });
 
   // ---- 群聊 ----
@@ -1085,8 +1138,8 @@ let chatInfo = null;
 let pairingServer = null;
 let transferServer = null;
 let trustedCredentialStore = null;
+let hostCredentialStore = null;
 let discoveryService = null;
-
 /**
  * 本机解除对某设备的信任，并立即把变更推给界面。
  * reason=remote 表示是对端主动送达的撤销，界面据此区分「从未配对」和「被对方解除」。
@@ -1122,6 +1175,21 @@ function demoteUntrusted(deviceId, context = '') {
   revokeTrustLocal(id, { reason: 'remote', deviceName: '' });
   logEvent('warn', 'pairing', `对端已不信任本机${context ? `（${context}）` : ''}，已自动解除信任，需重新配对`);
   return true;
+}
+
+/** 读取主机的统一密码（不暴露给前端），仅用于挂载解析 */
+function hostPasswordFor(host) {
+  const id = String(host || '').trim();
+  if (!id || !hostCredentialStore) return '';
+  try { return JSON.parse(hostCredentialStore.get(id) || '{}').password || ''; } catch { return ''; }
+}
+
+/** 用主机密码补全挂载项里缺失的 password（不修改原始记录） */
+function resolveMountPassword(mount) {
+  if (!mount) return mount;
+  if (mount.password) return mount;
+  const fromHost = hostPasswordFor(mount.host);
+  return fromHost ? { ...mount, password: fromHost } : mount;
 }
 
 /**

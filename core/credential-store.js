@@ -17,6 +17,8 @@ function createCredentialStore(file, { safeStorage, machineKey = `${process.plat
     set(deviceId, credential) { const data = read(); data[deviceId] = encode(String(credential)); fs.mkdirSync(path.dirname(file), { recursive: true }); const tmp = `${file}.tmp`; fs.writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 }); fs.renameSync(tmp, file); },
     get(deviceId) { const record = read()[deviceId]; return record ? decode(record) : null; },
     remove(deviceId) { const data = read(); delete data[deviceId]; fs.writeFileSync(file, JSON.stringify(data), { mode: 0o600 }); },
+    /** 列出所有已存的 deviceId，调用方按需解码（注意：返回的是明文键） */
+    list() { return Object.keys(read()); },
   };
 }
 module.exports = { createCredentialStore };

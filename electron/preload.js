@@ -40,6 +40,11 @@ contextBridge.exposeInMainWorld('api', {
     mountOne: (m) => ipcRenderer.invoke('mount:mountOne', m),
     unmount: (mp) => ipcRenderer.invoke('mount:unmount', mp),
   },
+  host: {
+    list: () => ipcRenderer.invoke('host:list'),
+    set: (data) => ipcRenderer.invoke('host:set', data),
+    remove: (data) => ipcRenderer.invoke('host:remove', data),
+  },
 
   chat: {
     info: () => ipcRenderer.invoke('chat:info'),

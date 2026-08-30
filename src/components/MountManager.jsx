@@ -138,6 +138,8 @@ export default function MountManager({ sys }) {
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [hostPasswords, setHostPasswords] = useState({}); // { [host]: { hasPassword, updatedAt } }
+  const [editingHost, setEditingHost] = useState(null); // { host, currentPassword } | null
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
 
@@ -159,8 +161,9 @@ export default function MountManager({ sys }) {
   );
 
   const refresh = useCallback(async () => {
-    const list = await window.api.mounts.list();
+    const [list, hosts] = await Promise.all([window.api.mounts.list(), window.api.host.list()]);
     setMounts(list);
+    setHostPasswords(Object.fromEntries(hosts.map((h) => [h.host, h])));
   }, []);
 
   useEffect(() => {
@@ -327,6 +330,35 @@ export default function MountManager({ sys }) {
         </div>
       </div>
 
+      {Object.keys(hostPasswords).length > 0 && (
+        <div className="settings">
+          <div className="setting-row" style={{ alignItems: 'flex-start' }}>
+            <span className="k" style={{ paddingTop: 6 }}>主机账号</span>
+            <div className="host-list" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {Object.values(hostPasswords).map((h) => (
+                <div key={h.host} className="host-pw-row" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8 }}>
+                  <code className="mono" style={{ flex: 1 }}>{h.host}</code>
+                  <span className={h.hasPassword ? 'badge ok' : 'badge warn-text'} style={{ fontSize: 12 }}>
+                    {h.hasPassword ? `已设密码${h.updatedAt ? `（更新于 ${new Date(h.updatedAt).toLocaleDateString()}）` : ''}` : '未设密码'}
+                  </span>
+                  <button className="btn small" onClick={() => setEditingHost({ host: h.host, hasPassword: h.hasPassword })}>
+                    {h.hasPassword ? '更新' : '设置'}
+                  </button>
+                  {h.hasPassword && (
+                    <button className="btn small danger" onClick={async () => {
+                      await window.api.host.remove({ host: h.host });
+                      show(`已移除 ${h.host} 的统一密码`);
+                      refresh();
+                    }}>删除</button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <span className="hint">同主机所有共享共享同一密码；同步时新共享自动继承</span>
+          </div>
+        </div>
+      )}
+
       <ApiSyncPanel onImported={refresh} home={home} root={root} />
 
       {mounts.length === 0 ? (
@@ -347,8 +379,11 @@ export default function MountManager({ sys }) {
                     <p className="path mono">
                       smb://{m.account}@{m.host}/{m.shareName} → {resolvedMountPoint(m)}
                     </p>
-                    {!m.password && (
-                      <p className="hint warn-text">未设置密码，挂载与自动挂载会失败，点「编辑」填写</p>
+                    {!m.password && hostPasswords[m.host]?.hasPassword && (
+                      <p className="hint">本机无独立密码，将使用主机 {m.host} 的统一密码</p>
+                    )}
+                    {!m.password && !hostPasswords[m.host]?.hasPassword && (
+                      <p className="hint warn-text">未设置密码且该主机也无统一密码，挂载会失败，点「编辑」填写</p>
                     )}
                   </div>
                 </div>
@@ -431,7 +466,28 @@ export default function MountManager({ sys }) {
   );
 }
 
-function MountForm({ root, initial = null, onSubmit, onCancel }) {
+function HostPasswordForm({ host, hasPassword, onSubmit, onCancel }) {
+  const [password, setPassword] = useState('');
+  const [err, setErr] = useState('');
+  const submit = () => {
+    if (!password) return setErr('请输入密码');
+    onSubmit(password);
+  };
+  return (
+    <div className="form">
+      <p className="hint">主机：<code className="mono">{host}</code></p>
+      <label>新密码<input value={password} onChange={(e) => setPassword(e.target.value)} placeholder={hasPassword ? '新密码将覆盖原值' : '该主机的统一密码'} /></label>
+      {hasPassword && <p className="hint warn-text">更新后会覆盖该主机所有现有共享的密码。</p>}
+      {err && <p className="error">{err}</p>}
+      <div className="modal-foot">
+        <button className="btn ghost" onClick={onCancel}>取消</button>
+        <button className="btn primary" onClick={submit}>保存</button>
+      </div>
+    </div>
+  );
+}
+
+function MountForm({ root, initial = null, hostHasPassword = false, onSubmit, onCancel }) {
   const isEdit = Boolean(initial);
   const [host, setHost] = useState(initial?.host || DEFAULT_HOST);
   const [shareName, setShareName] = useState(initial?.shareName || '');
@@ -474,6 +530,7 @@ function MountForm({ root, initial = null, onSubmit, onCancel }) {
       </div>
       <p className="hint">
         挂载点：{root ? `${root}/${shareName || '<共享名>'}` : `~/Shared/${shareName || '<共享名>'}`}
+        {hostHasPassword && ' · 本机留空密码将使用该主机的统一密码'}
       </p>
       {err && <p className="error">{err}</p>}
       <div className="modal-foot">

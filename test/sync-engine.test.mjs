@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const engine = require('../core/sync-engine.js');
 const {
-  TRASH_DIR, DEFAULT_TRASH_RETENTION_DAYS, backoffMs, chunkPlan, computePlan, extrasOnSlave,
+  TRASH_DIR, DEFAULT_TRASH_RETENTION_DAYS, backoffMs, buildIgnoreMatcher, carryFailures, chunkPlan, computePlan, extrasOnSlave,
   isInternalPath, normalizeRelPath, parseTrashStamp, purgeStamps, scanTree, toIndex, trashDestination, trashStamp,
 } = engine;
 
@@ -158,4 +158,93 @@ test('内容变了但大小和时间都相同时会被漏判 —— 这是已知
   const current = new Map([['a.txt', { size: 3, mtimeMs: 100 }]]);
   const index = { 'a.txt': { size: 3, mtimeMs: 100 } };
   assert.deepEqual(computePlan(current, index).toPush, []);
+});
+
+test('buildIgnoreMatcher 解析纯文件名匹配任意层级', () => {
+  const m = buildIgnoreMatcher('node_modules');
+  assert.equal(m('node_modules', true), true);
+  assert.equal(m('a/node_modules', true), true);
+  assert.equal(m('a/node_modules/x.js', false), true);
+  assert.equal(m('src/app.js', false), false);
+});
+
+test('buildIgnoreMatcher 末尾 / 仅匹配目录', () => {
+  const m = buildIgnoreMatcher('tmp/');
+  assert.equal(m('tmp', true), true);
+  assert.equal(m('tmp', false), false); // 同名文件不忽略
+  assert.equal(m('a/tmp', true), true);
+  assert.equal(m('tmp/cache/a.bin', false), true); // 目录规则覆盖其后代
+  assert.equal(m('a/tmp/cache/a.bin', false), true);
+});
+
+test('buildIgnoreMatcher 通配与锚定', () => {
+  const star = buildIgnoreMatcher('*.log');
+  assert.equal(star('x.log', false), true);
+  assert.equal(star('a/x.log', false), true);
+  assert.equal(star('x.log.gz', false), false);
+
+  const anchored = buildIgnoreMatcher('/build');
+  assert.equal(anchored('build', true), true); // 根目录
+  assert.equal(anchored('a/build', true), false); // 非根不匹配
+});
+
+test('buildIgnoreMatcher 跳过空行与注释', () => {
+  const m = buildIgnoreMatcher('\n  # comment\n\nnode_modules\n');
+  assert.equal(m('node_modules', true), true);
+  assert.equal(m('other', false), false);
+});
+
+test('scanTree 用 ignore 排除用户规则', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'innernet-ign-'));
+  fs.mkdirSync(path.join(root, 'node_modules'));
+  fs.writeFileSync(path.join(root, 'node_modules', 'x.js'), 'x');
+  fs.writeFileSync(path.join(root, 'app.js'), 'app');
+  fs.writeFileSync(path.join(root, 'debug.log'), 'log');
+  const matcher = buildIgnoreMatcher('node_modules\n*.log');
+  const found = scanTree(root, { ignore: (rel, isDir) => isInternalPath(rel) || matcher(rel, isDir) });
+  assert.equal(found.has('app.js'), true);
+  assert.equal(found.has('node_modules/x.js'), false);
+  assert.equal(found.has('debug.log'), false);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('computePlan 被忽略文件不触发回收', () => {
+  const current = new Map([['app.js', { size: 1, mtimeMs: 1 }]]);
+  const index = {
+    'app.js': { size: 1, mtimeMs: 1 },
+    'node_modules/x.js': { size: 1, mtimeMs: 1 }, // 已同步过，后加忽略
+  };
+  const matcher = buildIgnoreMatcher('node_modules');
+  const plan = computePlan(current, index, matcher);
+  assert.deepEqual(plan.toPush, []);
+  assert.deepEqual(plan.toTrash, []); // 不回收被忽略的
+});
+
+test('extrasOnSlave 可按任务策略保留或清理从端排除项', () => {
+  const current = new Map([['app.js', { size: 1, mtimeMs: 1 }]]);
+  const remote = ['app.js', 'cache/a.bin', 'stray.txt'];
+  const matcher = buildIgnoreMatcher('cache/');
+  assert.deepEqual(extrasOnSlave(current, remote, matcher), ['stray.txt']);
+  assert.deepEqual(extrasOnSlave(current, remote), ['cache/a.bin', 'stray.txt']);
+});
+
+test('carryFailures 失败文件保留旧快照，下一轮仍判为变更', () => {
+  const current = new Map([
+    ['ok.txt', { size: 1, mtimeMs: 1 }],
+    ['fail-old.txt', { size: 2, mtimeMs: 2 }],
+    ['fail-new.txt', { size: 3, mtimeMs: 3 }],
+  ]);
+  const prevIndex = {
+    'ok.txt': { size: 1, mtimeMs: 1 },
+    'fail-old.txt': { size: 1, mtimeMs: 1 }, // 旧快照（内容变了但本轮推送失败）
+  };
+  const next = carryFailures(toIndex(current), prevIndex, ['fail-old.txt', 'fail-new.txt']);
+  const plan = computePlan(current, next);
+  assert.deepEqual(plan.toPush, ['fail-new.txt', 'fail-old.txt']); // 失败文件下轮重推
+  assert.deepEqual(plan.toTrash, []);
+});
+
+test('carryFailures 空失败列表时索引等于扫描快照', () => {
+  const current = new Map([['a.txt', { size: 1, mtimeMs: 1 }]]);
+  assert.deepEqual(carryFailures(toIndex(current), {}, []), toIndex(current));
 });

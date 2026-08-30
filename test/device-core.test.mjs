@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const schema = require('../core/device-schema');
-const { resolveCapabilities, buildLocalDevice } = require('../core/capability-resolver');
+const { resolveCapabilities, resolveAdvertisedCapabilities, buildLocalDevice } = require('../core/capability-resolver');
 const { mergeDiscovered, markOffline } = require('../core/discovery');
 const { minimalAnnouncement } = require('../electron/discovery-service');
 
@@ -42,5 +42,42 @@ test('设备注册表处理 IP 更新、离线和身份冲突', () => {
 
 test('发现公告只包含最小公开字段，不包含网络身份敏感资料', () => {
   const p = minimalAnnouncement({ schemaVersion: 1, deviceId: 'dev_' + 'c'.repeat(32), deviceName: '测试', deviceType: 'desktop', platform: 'darwin', app: { version: '2.0.0' }, services: { chat: { port: 7890 } }, capabilities: { chat: { supported: true, configured: true, available: true }, smbMount: { supported: true, configured: true, available: true } }, identity: { fingerprint: 'secret' }, network: { preferredAddress: '10.0.0.1' } });
-  assert.equal(p.identity.fingerprint, 'secret'); assert.equal(p.identity.publicKey, undefined); assert.equal(p.network, undefined); assert.equal(p.capabilities.chat.available, undefined); assert.equal(p.capabilities.chat.supported, true);
+  assert.equal(p.identity.fingerprint, 'secret'); assert.equal(p.identity.publicKey, undefined); assert.equal(p.network, undefined); assert.equal(p.capabilities.chat.available, true); assert.equal(p.capabilities.chat.supported, true);
+});
+
+test('发现公告保留运行态能力和不可用原因', () => {
+  const p = minimalAnnouncement({
+    capabilities: {
+      fileReceive: { supported: true, configured: true, available: false, verified: true, reasonCode: 'SERVICE_UNAVAILABLE' },
+    },
+  });
+  assert.deepEqual(p.capabilities.fileReceive, {
+    supported: true,
+    configured: true,
+    available: false,
+    verified: true,
+    reasonCode: 'SERVICE_UNAVAILABLE',
+  });
+});
+
+test('远端能力按本机信任关系重算并兼容旧公告', () => {
+  const remote = {
+    platform: 'win32',
+    capabilities: {
+      chat: { supported: true, configured: true, available: true },
+      fileReceive: { supported: true, configured: true, available: false, reasonCode: 'NOT_TRUSTED' },
+      smbShare: { supported: true, configured: true, available: false, reasonCode: 'SERVICE_UNAVAILABLE' },
+      wolSender: { supported: true, configured: true },
+    },
+  };
+  const untrusted = resolveAdvertisedCapabilities(remote, false);
+  assert.equal(untrusted.chat.available, true);
+  assert.equal(untrusted.fileReceive.available, false);
+  assert.equal(untrusted.fileReceive.reasonCode, 'NOT_TRUSTED');
+  assert.equal(untrusted.wolSender.available, true);
+
+  const trusted = resolveAdvertisedCapabilities(remote, true);
+  assert.equal(trusted.fileReceive.available, true);
+  assert.equal(trusted.smbShare.available, false);
+  assert.equal(trusted.smbShare.reasonCode, 'SERVICE_UNAVAILABLE');
 });

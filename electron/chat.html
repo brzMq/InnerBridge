@@ -172,6 +172,13 @@
 <script>
   (function () {
     var nick = localStorage.getItem('inner-net-nick') || '访客' + Math.floor(Math.random() * 900 + 100);
+    var requesterId = localStorage.getItem('inner-net-web-device-id');
+    if (!/^web_[A-Za-z0-9_-]{16,64}$/.test(requesterId || '')) {
+      requesterId = 'web_' + (window.crypto && window.crypto.randomUUID
+        ? window.crypto.randomUUID().replace(/-/g, '')
+        : Date.now().toString(36) + Math.random().toString(36).slice(2, 18));
+      localStorage.setItem('inner-net-web-device-id', requesterId);
+    }
     var nickBox = document.getElementById('nickBox');
     var input = document.getElementById('input');
     var list = document.getElementById('list');
@@ -496,13 +503,13 @@
       if (image && file.size > 5 * 1024 * 1024) { alert('图片不能超过 5MB'); return Promise.resolve(); }
       if (!image && !archive && file.size > 1024 * 1024) { alert('文本文件不能超过 1MB'); return Promise.resolve(); }
       if (archive && file.size > 200 * 1024 * 1024) { alert('压缩文件不能超过 200MB'); return Promise.resolve(); }
-      return fetch('/api/upload?name=' + encodeURIComponent(file.name || '') + (folder ? '&folder=1' : ''), {
+      return fetch('/api/upload?name=' + encodeURIComponent(file.name || '') + '&requesterId=' + encodeURIComponent(requesterId) + (folder ? '&folder=1' : ''), {
         method: 'POST',
         headers: { 'Content-Type': file.type || 'application/octet-stream' },
         body: file,
       }).then(function (r) { return r.json(); }).then(function (d) {
         if (!d.ok || !d.url) { alert(d.error || '上传失败'); return; }
-        var payload = { clientId: clientId(), nick: nick, text: input.value.trim() };
+        var payload = { clientId: clientId(), requesterId: requesterId, nick: nick, text: input.value.trim() };
         if (replyTo) payload.replyTo = { id: replyTo.id };
         if (d.kind !== 'image') payload.file = { url: d.url, name: d.name, kind: d.kind, size: d.size };
         else payload.image = d.url;
@@ -549,6 +556,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           clientId: clientId(),
+          requesterId: requesterId,
           nick: nick,
           text: text,
           replyTo: replyTo ? { id: replyTo.id } : undefined,

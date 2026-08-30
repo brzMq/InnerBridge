@@ -20,3 +20,4 @@ Thumbs.db
 # 本地临时
 *.tmp
 .tmp/
+.workbuddy/

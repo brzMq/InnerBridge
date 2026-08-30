@@ -212,6 +212,7 @@ function startChatServer(preferredPort = 7890, opts = {}) {
   const filesDir = opts.filesDir || null;
   const listenHost = opts.host || '0.0.0.0';
   const onEvent = (e) => { try { opts.onEvent && opts.onEvent(e); } catch { /* 忽略日志回调自身异常 */ } };
+  const onAccess = (e) => { try { opts.onAccess && opts.onAccess({ ...e, ip: String(e.ip || '').replace(/^::ffff:/, '') }); } catch { /* 记录失败不影响业务 */ } };
   const messages = loadPersist(persistFile);
   const clients = new Set();
   let maxId = messages.reduce((max, message) => Math.max(max, message.id || 0), 0);
@@ -265,6 +266,7 @@ function startChatServer(preferredPort = 7890, opts = {}) {
         const input = JSON.parse(await readBody(req));
         const challenge = opts.issueShareChallenge(String(input.requesterId || ''));
         if (!challenge) return sendJSON(res, 403, { error: '设备未获信任' });
+        onAccess({ requesterId: String(input.requesterId || ''), ip: req.socket.remoteAddress, kind: 'share' });
         return sendJSON(res, 200, challenge);
       } catch { return sendJSON(res, 400, { error: '挑战请求无效' }); }
     }
@@ -272,6 +274,7 @@ function startChatServer(preferredPort = 7890, opts = {}) {
       try {
         const input = JSON.parse(await readBody(req));
         if (!opts.verifyShareAuth(input.signed, String(input.requesterId || ''))) return sendJSON(res, 403, { error: '设备未获信任' });
+        onAccess({ requesterId: String(input.requesterId || ''), ip: req.socket.remoteAddress, kind: 'share' });
         return sendJSON(res, 200, { shares: typeof opts.shareManifest === 'function' ? opts.shareManifest() : [] });
       } catch { return sendJSON(res, 400, { error: '认证请求无效' }); }
     }
@@ -291,6 +294,8 @@ function startChatServer(preferredPort = 7890, opts = {}) {
     // 文件上传（二进制 body；文件夹由客户端压缩为 zip，并附带 ?folder=1）
     if (req.method === 'POST' && url.pathname === '/api/upload') {
       try {
+        const requesterId = String(url.searchParams.get('requesterId') || '').trim().slice(0, 80);
+        if (!requesterId) return sendJSON(res, 400, { error: '上传必须携带设备身份' });
         const origName = url.searchParams.get('name') || '';
         const policy = uploadPolicy(origName, req.headers['content-type']);
         const buf = await readBodyBuffer(req, policy.maxBytes);
@@ -298,16 +303,19 @@ function startChatServer(preferredPort = 7890, opts = {}) {
         const imgUrl = detectImageType(buf) ? saveImage(imagesDir, buf) : null;
         if (imgUrl) {
           onEvent({ level: 'info', source: 'chat', message: `图片已上传: ${imgUrl} (${buf.length} 字节)` });
+          onAccess({ requesterId, ip: req.socket.remoteAddress, kind: 'chat' });
           return sendJSON(res, 200, { ok: true, url: imgUrl, kind: 'image' });
         }
         if (policy.kind === 'image') throw new Error('图片内容与文件类型不匹配');
         if (policy.kind === 'archive') {
           const f = saveArchiveFile(filesDir, buf, origName, url.searchParams.get('folder') === '1');
           onEvent({ level: 'info', source: 'chat', message: `${f.kind === 'folder' ? '文件夹' : '压缩文件'}已上传: ${f.name} (${f.size} 字节)` });
+          onAccess({ requesterId, ip: req.socket.remoteAddress, kind: 'chat' });
           return sendJSON(res, 200, { ok: true, ...f });
         }
         const f = saveTextFile(filesDir, buf, origName);
         onEvent({ level: 'info', source: 'chat', message: `文本文件已上传: ${f.name} (${f.size} 字节)` });
+        onAccess({ requesterId, ip: req.socket.remoteAddress, kind: 'chat' });
         return sendJSON(res, 200, { ok: true, url: f.url, name: f.name, size: f.size, kind: 'text' });
       } catch (e) {
         onEvent({ level: 'warn', source: 'chat', message: '文件上传失败: ' + (e.message || e) });
@@ -356,6 +364,7 @@ function startChatServer(preferredPort = 7890, opts = {}) {
     if (req.method === 'POST' && url.pathname === '/api/msg') {
       try {
         const body = JSON.parse((await readBody(req)) || '{}');
+        const requesterId = String(body.requesterId || '').trim().slice(0, 80);
         const nick = String(body.nick || '').trim().slice(0, MAX_NICK);
         const text = String(body.text || '').trim().slice(0, MAX_TEXT);
         const clientId = normalizeClientId(body.clientId);
@@ -371,6 +380,10 @@ function startChatServer(preferredPort = 7890, opts = {}) {
                 size: Number.isFinite(body.file.size) && body.file.size >= 0 ? Math.floor(body.file.size) : 0,
               }
             : null;
+        if (!requesterId) {
+          onEvent({ level: 'warn', source: 'chat', message: '消息被拒: 未携带设备身份（不允许匿名发言）' });
+          return sendJSON(res, 400, { error: '请以本机设备身份进入群聊，不允许匿名发言' });
+        }
         if (!nick) {
           onEvent({ level: 'warn', source: 'chat', message: '消息被拒: 昵称为空' });
           return sendJSON(res, 400, { error: '昵称不能为空' });
@@ -387,6 +400,7 @@ function startChatServer(preferredPort = 7890, opts = {}) {
         const msg = {
           id: ++maxId,
           nick,
+          requesterId,
           text,
           ts: Date.now(),
           ...(clientId ? { clientId } : {}),
@@ -406,6 +420,7 @@ function startChatServer(preferredPort = 7890, opts = {}) {
         else if (file) preview = `[文件] ${file.name}`;
         else preview = text.length > 120 ? text.slice(0, 120) + '…' : text;
         onEvent({ level: 'info', source: 'chat', message: `消息 [${msg.nick}]: ${preview}` });
+        onAccess({ requesterId, ip: req.socket.remoteAddress, kind: 'chat', name: nick });
         sendJSON(res, 200, { ok: true, msg });
       } catch (e) {
         onEvent({ level: 'warn', source: 'chat', message: '消息被拒: ' + (e.message || e) });

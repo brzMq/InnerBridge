@@ -286,7 +286,7 @@ export default function ShareManager({ sys }) {
   };
 
   return (
-    <div className="page">
+    <div className="page app-page-surface">
       <div className="page-head">
         <div>
           <h2>共享文件夹</h2>

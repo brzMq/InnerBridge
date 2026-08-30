@@ -56,7 +56,7 @@ function scanTree(root, { ignore = isInternalPath } = {}) {
 }
 
 /** 与上次索引比对，得出本轮要推送和要移入回收区的相对路径 */
-function computePlan(current, index = {}) {
+function computePlan(current, index = {}, ignore = () => false) {
   const toPush = [];
   const toTrash = [];
   for (const [rel, meta] of current) {
@@ -64,20 +64,81 @@ function computePlan(current, index = {}) {
     if (!prev || prev.size !== meta.size || prev.mtimeMs !== meta.mtimeMs) toPush.push(rel);
   }
   for (const rel of Object.keys(index)) {
+    // 被忽略的文件即便主端已删，也不触发从端回收
+    if (ignore(rel, false)) continue;
     if (!current.has(rel)) toTrash.push(rel);
   }
   return { toPush: toPush.sort(), toTrash: toTrash.sort() };
 }
 
 /**
+ * 失败补偿：构建下一轮索引时，把本轮推送失败的文件「还原」为上一轮的快照
+ * （新文件则不写入索引）。这样下一轮 diff 仍会把这些文件判为变更，自动重推 ——
+ * 索引只记录真正成功同步过的状态。
+ */
+function carryFailures(nextIndex, prevIndex = {}, failedRels = []) {
+  const out = { ...nextIndex };
+  for (const rel of failedRels) {
+    if (prevIndex[rel]) out[rel] = prevIndex[rel];
+    else delete out[rel];
+  }
+  return out;
+}
+
+/**
+ * 把用户忽略规则（换行分隔的 gitignore 风格文本）编译为匹配函数 (rel, isDir) => boolean。
+ * 支持：空行与 `#` 注释、`* ?` 单层通配、`**` 跨层通配、末尾 `/` 表示仅目录、
+ * 无斜杠的纯文件名/模式匹配任意层级、以 `/` 开头表示锚定到主端根目录。
+ */
+function buildIgnoreMatcher(rulesText = '') {
+  const rules = String(rulesText || '')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s && !s.startsWith('#'));
+
+  const compiled = rules.map((rule) => {
+    const isDirOnly = rule.endsWith('/');
+    const body = isDirOnly ? rule.slice(0, -1) : rule;
+    const anchored = body.startsWith('/');
+    const pattern = (anchored ? body.slice(1) : body)
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&') // 转义正则元字符（保留 * ?）
+      .replace(/\*\*/g, '.*') // 跨层通配
+      .replace(/\*/g, '[^/]*') // 单层通配
+      .replace(/\?/g, '[^/]');
+    const re = anchored
+      ? new RegExp(`^${pattern}(?:$|/)`)
+      : new RegExp(`(?:^|/)${pattern}(?:$|/)`);
+    const descendantRe = isDirOnly
+      ? anchored
+        ? new RegExp(`^${pattern}/`)
+        : new RegExp(`(?:^|/)${pattern}/`)
+      : null;
+    return { re, descendantRe, isDirOnly };
+  });
+
+  return (rel, isDir = false) => {
+    const p = normalizeRelPath(rel);
+    for (const { re, descendantRe, isDirOnly } of compiled) {
+      if (isDirOnly) {
+        // `tmp/` 不匹配同名文件 tmp，但必须匹配 tmp/ 下的所有后代。
+        if ((isDir && re.test(p)) || (!isDir && descendantRe.test(p))) return true;
+      } else if (re.test(p)) {
+        return true;
+      }
+    }
+    return false;
+  };
+}
+
+/**
  * 主从单向：从端有而主端没有的文件视为多余，需要清理。
  * 只在全量校验轮调用 —— 日常增量不该拿从端清单去比对。
  */
-function extrasOnSlave(current, slaveList = []) {
+function extrasOnSlave(current, slaveList = [], ignore = () => false) {
   const extras = [];
   for (const rel of slaveList) {
     const norm = normalizeRelPath(rel);
-    if (norm && !current.has(norm)) extras.push(norm);
+    if (norm && !current.has(norm) && !ignore(norm, false)) extras.push(norm);
   }
   return [...new Set(extras)].sort();
 }
@@ -138,7 +199,9 @@ module.exports = {
   DEFAULT_CHUNK_SIZE,
   backoffMs,
   chunkPlan,
+  carryFailures,
   computePlan,
+  buildIgnoreMatcher,
   extrasOnSlave,
   isInternalPath,
   normalizeRelPath,

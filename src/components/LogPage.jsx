@@ -91,7 +91,7 @@ export default function LogPage() {
   };
 
   return (
-    <div className="page log-page">
+    <div className="page log-page app-page-surface">
       <div className="page-head">
         <div>
           <h2>运行日志</h2>

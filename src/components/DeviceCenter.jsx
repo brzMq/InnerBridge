@@ -1,6 +1,23 @@
 /* global setInterval, clearInterval */
 import React, { useEffect, useState } from 'react';
 
+const CAPABILITY_META = {
+  chat: '群聊',
+  fileSend: '发送文件',
+  fileReceive: '接收文件',
+  smbShare: 'SMB 共享',
+  smbMount: 'SMB 挂载',
+  shareSync: '文件同步',
+  wolSender: '远程唤醒',
+  wolTarget: '可被唤醒',
+};
+const capabilityStatus = (capability) => {
+  if (capability.available) return '可用';
+  if (capability.reasonCode === 'NOT_TRUSTED') return '需配对';
+  if (capability.reasonCode === 'NOT_CONFIGURED') return '待配置';
+  return '未就绪';
+};
+
 /** revokedName 非空表示这台设备刚刚解除了对本机的信任，需要重新配对 */
 const statusText = (d, local = false, revokedName = '') => {
   if (local) return '在线 · 本机';
@@ -15,10 +32,9 @@ export default function DeviceCenter() {
   const [localDeviceId, setLocalDeviceId] = useState('');
   const [pairing, setPairing] = useState(null);
   const [incoming, setIncoming] = useState([]);
-  const [codes, setCodes] = useState({});
   const [notice, setNotice] = useState('');
   const [revokedBy, setRevokedBy] = useState({});
-  const [lanDevices, setLanDevices] = useState([]);
+  const [accessLog, setAccessLog] = useState([]);
   const [wolTargets, setWolTargets] = useState({});
   const [localNics, setLocalNics] = useState([]);
   const [wolEditing, setWolEditing] = useState(null);
@@ -40,7 +56,7 @@ export default function DeviceCenter() {
       })
       .catch(() => {});
     window.api.pairing?.pending?.().then(setIncoming).catch(() => {});
-    window.api.lan?.list?.().then(setLanDevices).catch(() => {});
+    window.api.access?.list?.().then(setAccessLog).catch(() => {});
     window.api.wol?.list?.().then(setWolTargets).catch(() => {});
   };
 
@@ -102,7 +118,7 @@ export default function DeviceCenter() {
   }, [pairing?.sessionId, pairing?.state, pairing?.host, pairing?.port, pairing?.remoteDeviceId]);
 
   const confirmIncoming = async (item) => {
-    const result = await window.api.pairing.confirmIncoming({ sessionId: item.sessionId, code: codes[item.sessionId] || '' });
+    const result = await window.api.pairing.confirmIncoming({ sessionId: item.sessionId, code: item.code || '' });
     if (result.ok) {
       setIncoming((all) => all.filter((x) => x.sessionId !== item.sessionId));
       setRevokedBy((old) => {
@@ -179,7 +195,7 @@ export default function DeviceCenter() {
   };
 
   return (
-    <section className="device-center">
+    <section className="device-center app-page-surface">
       <div className="device-center-head">
         <div>
           <h2>设备中心</h2>
@@ -192,16 +208,10 @@ export default function DeviceCenter() {
 
       {incoming.map((item) => (
         <div className="pairing-notice" key={item.sessionId}>
-          <strong>{item.fromDeviceName}</strong> 请求与本机配对。请确认两端显示的配对码一致：
-          <strong>{item.code}</strong>
-          <input
-            aria-label="配对验证码"
-            value={codes[item.sessionId] || ''}
-            maxLength={6}
-            onChange={(e) => setCodes({ ...codes, [item.sessionId]: e.target.value.replace(/\D/g, '') })}
-          />
+          <strong>{item.fromDeviceName}</strong> 请求与本机配对。请在对方设备上确认显示的是同一个配对码：
+          <strong className="mono">{item.code}</strong>
           <button className="btn small" onClick={() => confirmIncoming(item)}>
-            允许配对
+            配对码一致，允许
           </button>
           <button
             className="btn small"
@@ -214,6 +224,13 @@ export default function DeviceCenter() {
           </button>
         </div>
       ))}
+
+      {pairing?.state === 'pending' && (
+        <div className="pairing-notice">
+          正在与 <strong>{pairing.deviceName}</strong> 配对，请确认对方设备显示相同配对码：
+          <strong className="mono">{pairing.code}</strong>
+        </div>
+      )}
 
       <div className="device-grid">
         {devices.map((d) => {
@@ -243,9 +260,9 @@ export default function DeviceCenter() {
                 {Object.entries(d.capabilities || {})
                   .filter(([, c]) => c.supported)
                   .map(([name, c]) => (
-                    <span key={name} className={c.available ? 'cap-on' : 'cap-off'}>
-                      {name}
-                      {c.available ? ' 可用' : ' 未就绪'}
+                    <span key={name} className={`capability-badge ${c.available ? 'cap-on' : 'cap-off'}`} title={c.reasonCode || ''}>
+                      {CAPABILITY_META[name] || name}
+                      <small>{capabilityStatus(c)}</small>
                     </span>
                   ))}
               </div>
@@ -254,8 +271,11 @@ export default function DeviceCenter() {
                   <small>本机网卡 MAC（供其他设备配置远程唤醒时复制）：</small>
                   {localNics.map((n) => (
                     <div key={`${n.name}-${n.mac}`} className="nic-row">
-                      <span>{n.name}（{n.address}）</span>
-                      <code className="mono">{n.mac}</code>
+                      <div className="nic-meta">
+                        <strong>{n.name}</strong>
+                        <span>{n.address}{n.family ? ` · ${n.family}` : ''}</span>
+                      </div>
+                      <code className="mono nic-mac">{n.mac}</code>
                       <button className="btn small" onClick={() => navigator.clipboard?.writeText(n.mac)}>复制</button>
                     </div>
                   ))}
@@ -330,25 +350,31 @@ export default function DeviceCenter() {
       </div>
 
       <div className="lan-devices">
-        <h3>局域网其他设备（未安装 InnerNet）</h3>
-        {lanDevices.length === 0 ? (
-          <p className="hint">
-            暂未发现。只有与本机产生过网络流量的设备才会出现在 ARP 表里（如访问过共享、被路由器广播过）。
-            本列表只读、不主动扫描网络，不会对任何设备发包。
-          </p>
+        <h3>访问过本机的设备</h3>
+        <p className="hint">
+          只有访问过本机服务的设备才会出现在这里（如拉取共享清单、群聊发言、文件同步）。
+          不主动扫描网络；设备名取自已配对信息，未配对设备仅显示短标识。
+        </p>
+        {accessLog.length === 0 ? (
+          <p className="hint">暂无记录。当其他设备访问本机的共享、群聊或同步服务后会自动出现。</p>
         ) : (
           <table className="lan-table">
             <thead>
-              <tr><th>IP 地址</th><th>MAC 地址</th><th>厂商（推断）</th></tr>
+              <tr><th>设备</th><th>IP</th><th>来源</th><th>最近访问</th></tr>
             </thead>
             <tbody>
-              {lanDevices.map((d) => (
-                <tr key={d.ip}>
-                  <td className="mono">{d.ip}</td>
-                  <td className="mono">{d.mac}</td>
-                  <td>{d.vendor || '未知'}</td>
-                </tr>
-              ))}
+              {accessLog.map((r, i) => {
+                const known = devices.find((d) => d.deviceId === r.requesterId);
+                const kindLabel = r.kind === 'chat' ? '群聊' : r.kind === 'share' ? '共享清单' : r.kind === 'sync' ? '文件同步' : (r.kind || '未知');
+                return (
+                  <tr key={`${r.requesterId}-${i}`}>
+                    <td className="mono">{known?.deviceName || known?.name || r.name || `${r.requesterId.slice(0, 8)}…`}</td>
+                    <td className="mono">{r.ip}</td>
+                    <td>{kindLabel}</td>
+                    <td>{new Date(r.at).toLocaleString()}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}

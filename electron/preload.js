@@ -13,7 +13,19 @@ contextBridge.exposeInMainWorld('api', {
     onIncoming: (callback) => { const listener = (_event, request) => callback(request); ipcRenderer.on('pairing:incoming', listener); return () => ipcRenderer.removeListener('pairing:incoming', listener); },
     onRevoked: (callback) => { const listener = (_event, info) => callback(info); ipcRenderer.on('pairing:revoked', listener); return () => ipcRenderer.removeListener('pairing:revoked', listener); },
   },
-  transfer: { info: () => ipcRenderer.invoke('transfer:info'), selectFile: () => ipcRenderer.invoke('transfer:selectFile'), requestChallenge: (input) => ipcRenderer.invoke('transfer:requestChallenge', input) },
+  transfer: {
+    info: () => ipcRenderer.invoke('transfer:info'),
+    selectFile: (kind) => ipcRenderer.invoke('transfer:selectFile', kind),
+    offer: (input) => ipcRenderer.invoke('transfer:offer', input),
+    sends: () => ipcRenderer.invoke('transfer:sends'),
+    removeSend: (transferId) => ipcRenderer.invoke('transfer:removeSend', transferId),
+    getSettings: () => ipcRenderer.invoke('transfer:getSettings'),
+    setSettings: (settings) => ipcRenderer.invoke('transfer:setSettings', settings),
+    selectCacheDir: () => ipcRenderer.invoke('transfer:selectCacheDir'),
+    listOffers: () => ipcRenderer.invoke('transfer:listOffers'),
+    decide: (input) => ipcRenderer.invoke('transfer:decide', input),
+    status: (transferId) => ipcRenderer.invoke('transfer:status', transferId),
+  },
   services: { health: () => ipcRenderer.invoke('services:health'), ports: () => ipcRenderer.invoke('services:ports'), setPorts: (ports) => ipcRenderer.invoke('services:setPorts', ports) },
   platform: process.platform,
 
@@ -45,8 +57,9 @@ contextBridge.exposeInMainWorld('api', {
     set: (data) => ipcRenderer.invoke('host:set', data),
     remove: (data) => ipcRenderer.invoke('host:remove', data),
   },
-  lan: {
-    list: () => ipcRenderer.invoke('lan:list'),
+  access: {
+    list: () => ipcRenderer.invoke('access:list'),
+    clear: () => ipcRenderer.invoke('access:clear'),
   },
   wol: {
     localNics: () => ipcRenderer.invoke('wol:localNics'),
@@ -57,15 +70,19 @@ contextBridge.exposeInMainWorld('api', {
   },
   sync: {
     state: () => ipcRenderer.invoke('sync:state'),
-    setConfig: (patch) => ipcRenderer.invoke('sync:setConfig', patch),
-    start: () => ipcRenderer.invoke('sync:start'),
-    stop: () => ipcRenderer.invoke('sync:stop'),
-    runNow: () => ipcRenderer.invoke('sync:runNow'),
-    resetIndex: () => ipcRenderer.invoke('sync:resetIndex'),
-    trash: () => ipcRenderer.invoke('sync:trash'),
-    restore: (data) => ipcRenderer.invoke('sync:restore', data),
-    purgeTrash: (opts) => ipcRenderer.invoke('sync:purgeTrash', opts),
+    addTask: (patch) => ipcRenderer.invoke('sync:task:add', patch),
+    invite: (id) => ipcRenderer.invoke('sync:task:invite', id),
+    updateTask: (id, patch) => ipcRenderer.invoke('sync:task:update', { id, patch }),
+    removeTask: (id) => ipcRenderer.invoke('sync:task:remove', id),
+    start: (id) => ipcRenderer.invoke('sync:task:start', id),
+    stop: (id) => ipcRenderer.invoke('sync:task:stop', id),
+    runNow: (id) => ipcRenderer.invoke('sync:task:runNow', id),
+    resetIndex: (id) => ipcRenderer.invoke('sync:task:resetIndex', id),
+    trash: (id) => ipcRenderer.invoke('sync:task:trash', id),
+    restore: (id, data) => ipcRenderer.invoke('sync:task:restore', { id, ...data }),
+    purgeTrash: (id, opts) => ipcRenderer.invoke('sync:task:purgeTrash', { id, ...opts }),
     pickDir: () => ipcRenderer.invoke('sync:pickDir'),
+    listDir: (dir) => ipcRenderer.invoke('sync:listDir', dir),
     onState: (callback) => {
       const listener = (_event, state) => callback(state);
       ipcRenderer.on('sync:state', listener);

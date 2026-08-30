@@ -49,8 +49,7 @@ function mergeMounts(existing, targetHost, incoming) {
   return [...others, ...merged];
 }
 
-function ApiSyncPanel({ onImported, home = '', root = '' }) {
-  const [host, setHost] = useState(DEFAULT_HOST);
+function ApiSyncPanel({ host, setHost, hostStatus, knownHosts, onEditHost, onRemoveHost, onImported, home = '', root = '' }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
 
@@ -88,7 +87,7 @@ function ApiSyncPanel({ onImported, home = '', root = '' }) {
       const next = mergeMounts(existing, target, list);
       await window.api.mounts.save(next);
       const synced = next.filter((m) => m.host === target);
-      const needPassword = synced.filter((m) => !m.password).length;
+      const needPassword = synced.filter((m) => !m.password && !hostStatus?.hasPassword).length;
       const parts = [`已从 ${target} 同步 ${synced.length} 个共享`];
       if (stale.length) parts.push(`清理 ${cleaned} 个失效记录${keptBusy ? `（${keptBusy} 个目录非空已保留）` : ''}`);
       if (needPassword) parts.push(`${needPassword} 个需要填写密码`);
@@ -102,30 +101,37 @@ function ApiSyncPanel({ onImported, home = '', root = '' }) {
   };
 
   return (
-    <div className="sync-panel">
-      <div className="sync-head">
-        <div>
-          <h3>同步共享清单</h3>
-          <p className="sub">用已配对设备的 Ed25519 签名拉取 Windows 端共享清单</p>
-        </div>
+    <div className="settings host-sync-panel">
+      <div className="setting-row host-sync-row">
+        <span className="k">Windows 主机</span>
+        <input
+          className="text-input"
+          list="known-windows-hosts"
+          placeholder="主机 IP"
+          value={host}
+          onChange={(e) => setHost(e.target.value)}
+        />
+        <datalist id="known-windows-hosts">
+          {knownHosts.map((item) => <option value={item} key={item} />)}
+        </datalist>
+        <span className={hostStatus?.hasPassword ? 'badge ok' : 'badge warn'}>
+          {hostStatus?.hasPassword
+            ? `已设密码${hostStatus.updatedAt ? ` · ${new Date(hostStatus.updatedAt).toLocaleDateString()}` : ''}`
+            : '未设统一密码'}
+        </span>
+        <button className="btn small" disabled={!host.trim()} onClick={() => onEditHost(host.trim(), Boolean(hostStatus?.hasPassword))}>
+          {hostStatus?.hasPassword ? '更新密码' : '设置密码'}
+        </button>
+        {hostStatus?.hasPassword && (
+          <button className="btn small danger" onClick={() => onRemoveHost(host.trim())}>删除密码</button>
+        )}
+        <button className="btn small primary" onClick={pull} disabled={busy || !host.trim()}>
+          {busy ? '拉取中…' : '拉取共享清单'}
+        </button>
       </div>
-      <div className="sync-body">
-        <div className="sync-form">
-          <input
-            className="text-input"
-            placeholder="Windows 主机 IP"
-            value={host}
-            onChange={(e) => setHost(e.target.value)}
-            style={{ width: 150 }}
-          />
-          <button className="btn small primary" onClick={pull} disabled={busy || !host.trim()}>
-            {busy ? '同步中…' : '⌁ 拉取共享清单'}
-          </button>
-        </div>
-        <p className="hint">
-          请先在设备中心完成配对。清单只同步共享名和账号，SMB 密码保留在本机，不会经网络传输。
-        </p>
-      </div>
+      <p className="hint host-sync-hint">
+        配对后可同步该主机的共享名和账号；统一密码仅保存在本机，并自动用于该主机的所有共享。
+      </p>
       {msg && <div className={`toast ${msg.ok ? '' : 'err'}`}>{msg.text}</div>}
     </div>
   );
@@ -139,6 +145,7 @@ export default function MountManager({ sys }) {
   const [showImport, setShowImport] = useState(false);
   const [editing, setEditing] = useState(null);
   const [hostPasswords, setHostPasswords] = useState({}); // { [host]: { hasPassword, updatedAt } }
+  const [syncHost, setSyncHost] = useState(DEFAULT_HOST);
   const [editingHost, setEditingHost] = useState(null); // { host, currentPassword } | null
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
@@ -164,6 +171,10 @@ export default function MountManager({ sys }) {
     const [list, hosts] = await Promise.all([window.api.mounts.list(), window.api.host.list()]);
     setMounts(list);
     setHostPasswords(Object.fromEntries(hosts.map((h) => [h.host, h])));
+    setSyncHost((current) => {
+      const known = list.find((item) => item.host)?.host || hosts[0]?.host;
+      return current === DEFAULT_HOST && known ? known : current;
+    });
   }, []);
 
   useEffect(() => {
@@ -288,8 +299,20 @@ export default function MountManager({ sys }) {
     show(`已导入 ${incoming.length} 个共享`);
   };
 
+  const removeHostPassword = async (host) => {
+    await window.api.host.remove({ host });
+    show(`已移除 ${host} 的统一密码`);
+    refresh();
+  };
+
+  const knownHosts = [...new Set([
+    ...Object.keys(hostPasswords),
+    ...mounts.map((item) => item.host),
+  ].filter(Boolean))];
+  const selectedHostStatus = hostPasswords[syncHost.trim()];
+
   return (
-    <div className="page">
+    <div className="page app-page-surface">
       <div className="page-head">
         <div>
           <h2>聚合挂载</h2>
@@ -314,13 +337,24 @@ export default function MountManager({ sys }) {
         </div>
         <div className="setting-row">
           <span className="k">挂载方式</span>
-          <div className="seg">
-            <button className={mode === 'autofs' ? 'on' : ''} onClick={() => setMode('autofs')}>
-              自动（后台守护）
-            </button>
-            <button className={mode === 'manual' ? 'on' : ''} onClick={() => setMode('manual')}>
-              手动 (mount_smbfs)
-            </button>
+          <div className="mount-mode-controls">
+            <div className="seg">
+              <button className={mode === 'autofs' ? 'on' : ''} onClick={() => setMode('autofs')}>
+                自动（后台守护）
+              </button>
+              <button className={mode === 'manual' ? 'on' : ''} onClick={() => setMode('manual')}>
+                手动 (mount_smbfs)
+              </button>
+            </div>
+            {mode === 'autofs' ? (
+              <button className="btn small primary" onClick={applyAutofs} disabled={busy}>
+                {busy ? '配置中…' : '启用并验证'}
+              </button>
+            ) : (
+              <button className="btn small primary" onClick={mountAll} disabled={busy}>
+                {busy ? '挂载中…' : '挂载全部'}
+              </button>
+            )}
           </div>
           <span className="hint">
             {mode === 'autofs'
@@ -330,36 +364,17 @@ export default function MountManager({ sys }) {
         </div>
       </div>
 
-      {Object.keys(hostPasswords).length > 0 && (
-        <div className="settings">
-          <div className="setting-row" style={{ alignItems: 'flex-start' }}>
-            <span className="k" style={{ paddingTop: 6 }}>主机账号</span>
-            <div className="host-list" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {Object.values(hostPasswords).map((h) => (
-                <div key={h.host} className="host-pw-row" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8 }}>
-                  <code className="mono" style={{ flex: 1 }}>{h.host}</code>
-                  <span className={h.hasPassword ? 'badge ok' : 'badge warn-text'} style={{ fontSize: 12 }}>
-                    {h.hasPassword ? `已设密码${h.updatedAt ? `（更新于 ${new Date(h.updatedAt).toLocaleDateString()}）` : ''}` : '未设密码'}
-                  </span>
-                  <button className="btn small" onClick={() => setEditingHost({ host: h.host, hasPassword: h.hasPassword })}>
-                    {h.hasPassword ? '更新' : '设置'}
-                  </button>
-                  {h.hasPassword && (
-                    <button className="btn small danger" onClick={async () => {
-                      await window.api.host.remove({ host: h.host });
-                      show(`已移除 ${h.host} 的统一密码`);
-                      refresh();
-                    }}>删除</button>
-                  )}
-                </div>
-              ))}
-            </div>
-            <span className="hint">同主机所有共享共享同一密码；同步时新共享自动继承</span>
-          </div>
-        </div>
-      )}
-
-      <ApiSyncPanel onImported={refresh} home={home} root={root} />
+      <ApiSyncPanel
+        host={syncHost}
+        setHost={setSyncHost}
+        hostStatus={selectedHostStatus}
+        knownHosts={knownHosts}
+        onEditHost={(host, hasPassword) => setEditingHost({ host, hasPassword })}
+        onRemoveHost={removeHostPassword}
+        onImported={refresh}
+        home={home}
+        root={root}
+      />
 
       {mounts.length === 0 ? (
         <div className="empty">
@@ -368,10 +383,9 @@ export default function MountManager({ sys }) {
           <p className="sub">点「导入清单」粘贴 Windows 端导出的 JSON，或手动添加</p>
         </div>
       ) : (
-        <>
-          <div className="mount-list">
-            {mounts.map((m) => (
-              <div className="mount-item" key={m.id}>
+        <div className="mount-list">
+          {mounts.map((m) => (
+            <div className="mount-item" key={m.id}>
                 <div className="mount-info">
                   <span className="dir-icon">📁</span>
                   <div>
@@ -403,27 +417,9 @@ export default function MountManager({ sys }) {
                     移除
                   </button>
                 </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="apply-bar">
-            {mode === 'autofs' ? (
-              <button className="btn primary big" onClick={applyAutofs} disabled={busy}>
-                {busy ? '配置中…' : '⚙ 启用自动挂载并立即验证'}
-              </button>
-            ) : (
-              <button className="btn primary big" onClick={mountAll} disabled={busy}>
-                {busy ? '挂载中…' : '⌁ 挂载全部'}
-              </button>
-            )}
-            <span className="hint">
-              {mode === 'autofs'
-                ? '使用当前用户的后台任务，不修改 SIP 保护的系统文件'
-                : '逐个挂载到聚合目录，立即生效'}
-            </span>
-          </div>
-        </>
+            </div>
+          ))}
+        </div>
       )}
 
       {showAdd && (

@@ -19,7 +19,7 @@ const { createAccessLog } = require('../core/access-log');
 const wol = require('../core/wol');
 const { wake } = require('./wol-service');
 const { createSyncService } = require('./sync-service');
-const { buildLocalDevice } = require('../core/capability-resolver');
+const { buildLocalDevice, resolveAdvertisedCapabilities } = require('../core/capability-resolver');
 const { startDiscovery } = require('./discovery-service');
 const { createCredentialStore } = require('../core/credential-store');
 const { startTransferServer } = require('./transfer-server');
@@ -174,6 +174,7 @@ const CHAT_MESSAGES_FILE = path.join(DATA_DIR, 'messages.jsonl');
 const CHAT_IMAGES_DIR = path.join(DATA_DIR, 'chat-images');
 const CHAT_FILES_DIR = path.join(DATA_DIR, 'chat-files');
 const TRANSFER_DIR = path.join(DATA_DIR, 'transfer');
+const TRANSFER_HISTORY_FILE = path.join(DATA_DIR, 'transfer-history.json');
 
 function loadJSON(file, fallback) {
   try {
@@ -205,6 +206,30 @@ const shareManifestForSync = () =>
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const loadSettings = () => loadJSON(SETTINGS_FILE, {});
 const saveSettings = (s) => saveJSON(SETTINGS_FILE, s);
+const transferSettings = () => {
+  const settings = loadSettings();
+  return {
+    compressFolders: settings.transferCompressFolders === true,
+    cacheDir: path.resolve(String(settings.transferCacheDir || TRANSFER_DIR)),
+  };
+};
+
+function availableDirectory(parent, name) {
+  const safeName = path.basename(String(name || '接收的文件夹')).replace(/[\\/:*?"<>|]/g, '_').trim() || '接收的文件夹';
+  let candidate = path.join(parent, safeName);
+  for (let index = 1; fs.existsSync(candidate); index += 1) candidate = path.join(parent, `${safeName} (${index})`);
+  return candidate;
+}
+
+function assertSafeTarEntries(archive) {
+  const entries = runCmd(IS_WIN ? 'tar' : '/usr/bin/tar', ['-tf', archive], { timeout: 600000 }).split(/\r?\n/).filter(Boolean);
+  for (const entry of entries) {
+    const normalized = entry.replace(/\\/g, '/');
+    if (normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || normalized.split('/').includes('..')) {
+      throw new Error(`文件夹中包含不安全路径：${entry}`);
+    }
+  }
+}
 
 // ---------- 权限 ----------
 
@@ -597,6 +622,19 @@ function getLocalIPs() {
   return out;
 }
 
+/** 过滤系统/虚拟接口并优先选择 IPv4，供 WOL 展示与能力判断共用。 */
+function listPhysicalNics() {
+  const nics = [];
+  const skip = /^(lo|awdl|llw|utun|gif|stf|bridge|anpi|veth|vmnet)|virtual|bluetooth/i;
+  for (const [name, infos] of Object.entries(os.networkInterfaces())) {
+    if (skip.test(name)) continue;
+    const usable = (infos || []).filter((info) => info.mac && info.mac !== '00:00:00:00:00:00' && !info.internal);
+    const info = usable.find((item) => item.family === 'IPv4') || usable[0];
+    if (info) nics.push({ name, mac: info.mac, address: info.address, family: info.family });
+  }
+  return nics;
+}
+
 // ---------- IPC ----------
 
 function registerIpc() {
@@ -607,9 +645,11 @@ function registerIpc() {
   // 访问过本机的设备记录（群聊/共享清单/同步入口）
   accessLog = createAccessLog(path.join(DATA_DIR, 'access-log.json'));
   // 文件夹同步：主从角色的编排层，内部按角色决定是否起监听或 HTTP 服务
+  const syncIdentity = loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), {});
   syncService = createSyncService({
     dataDir: DATA_DIR,
-    deviceId: loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), {}).deviceId,
+    deviceId: syncIdentity.deviceId,
+    deviceName: syncIdentity.deviceName || os.hostname(),
     privateKeyPath: path.join(DATA_DIR, 'device.json.private.pem'),
     port: normalizeServicePorts(loadSettings().servicePorts || {}).sync,
     startServer: (opts) => startSyncServer({ ...opts, createChallenge }),
@@ -618,64 +658,120 @@ function registerIpc() {
     onState: (state) => mainWindow?.webContents.send('sync:state', state),
     onAccess: (e) => accessLog?.record(e),
   });
-  ipcMain.handle('transfer:info', () => ({ port: transferServer?.port || null, localOnly: false, host: transferServer?.host || '0.0.0.0', root: TRANSFER_DIR }));
-  ipcMain.handle('transfer:requestChallenge', async (_e, input = {}) => { const host = String(input.host || ''); const port = Number(input.port || 7891); if (!host || !input.sessionId || !input.transferId || !input.senderId) return { ok: false, reasonCode: 'CHALLENGE_PARAMS_INVALID' }; try { const response = await globalThis.fetch(`http://${host}:${port}/api/pair/transfer-challenge`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: input.sessionId, senderId: input.senderId, transferId: input.transferId }) }); const body = await response.json(); if (!response.ok) { demoteUntrusted(String(input.senderId || ''), '文件传输'); return { ok: false, reasonCode: 'CHALLENGE_REJECTED' }; } return body; } catch { return { ok: false, reasonCode: 'CHALLENGE_UNREACHABLE' }; } });
-  ipcMain.handle('transfer:selectFile', async () => { const picked = await dialog.showOpenDialog({ properties: ['openFile', 'openDirectory'], title: '选择要传输的文件或文件夹' }); if (picked.canceled || !picked.filePaths[0]) return null; const file = picked.filePaths[0]; const stat = fs.statSync(file); if (stat.isDirectory()) return { path: file, name: path.basename(file), kind: 'folder', size: 0, sha256: null }; const sha256 = await hashFile(file); return { path: file, name: path.basename(file), kind: 'file', size: stat.size, sha256 }; });
+  ipcMain.handle('transfer:info', () => ({ port: transferServer?.port || null, localOnly: false, host: transferServer?.host || '0.0.0.0', root: transferServer?.root || transferSettings().cacheDir }));
+  ipcMain.handle('transfer:getSettings', () => transferSettings());
+  ipcMain.handle('transfer:setSettings', (_e, patch = {}) => {
+    const current = transferSettings();
+    const next = {
+      compressFolders: patch.compressFolders === undefined ? current.compressFolders : Boolean(patch.compressFolders),
+      cacheDir: patch.cacheDir ? path.resolve(String(patch.cacheDir)) : current.cacheDir,
+    };
+    fs.mkdirSync(next.cacheDir, { recursive: true });
+    const settings = loadSettings();
+    settings.transferCompressFolders = next.compressFolders;
+    settings.transferCacheDir = next.cacheDir;
+    saveSettings(settings);
+    return { ok: true, ...next, restartRequired: next.cacheDir !== (transferServer?.root || current.cacheDir) };
+  });
+  ipcMain.handle('transfer:selectCacheDir', async () => {
+    const picked = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'], title: '选择 P2P 传输缓存目录', defaultPath: transferSettings().cacheDir });
+    return picked.canceled ? null : picked.filePaths[0] || null;
+  });
+  ipcMain.handle('transfer:selectFile', async (_e, kind = '') => { const folderOnly = kind === 'folder'; const picked = await dialog.showOpenDialog({ properties: [folderOnly ? 'openDirectory' : 'openFile'], title: folderOnly ? '选择要传输的文件夹' : '选择要传输的文件' }); if (picked.canceled || !picked.filePaths[0]) return null; const file = picked.filePaths[0]; const stat = fs.statSync(file); if (stat.isDirectory()) return { path: file, name: path.basename(file), kind: 'folder', size: 0, sha256: null }; const sha256 = await hashFile(file); return { path: file, name: path.basename(file), kind: 'file', size: stat.size, sha256 }; });
 
   // ---- P2P 传输：发送 / 接收 / 状态（仅可信设备，无文件大小限制，分块流式） ----
   const transferSends = new Map(); // transferId -> 发送进度
+  for (const item of loadJSON(TRANSFER_HISTORY_FILE, [])) {
+    if (item?.transferId && item?.name && ['done', 'error'].includes(item.state)) {
+      transferSends.set(item.transferId, { ...item, file: { name: item.name }, sent: Number(item.sent) || 0, total: Number(item.total) || 0 });
+    }
+  }
+  const saveTransferHistory = () => saveJSON(TRANSFER_HISTORY_FILE, [...transferSends.values()]
+    .filter((item) => ['done', 'error'].includes(item.state))
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, 100)
+    .map((item) => ({ transferId: item.transferId, name: item.file.name, state: item.state, sent: item.sent, total: item.total, error: item.error, createdAt: item.createdAt })));
   const TRANSFER_CHUNK = 5 * 1024 * 1024;
   // 发起传输：取挑战 → 构造 manifest → 提交 offer（含 token）
-  ipcMain.handle('transfer:offer', async (_e, { targetAddress, targetPort = 49152, targetDeviceId, file } = {}) => {
+  ipcMain.handle('transfer:offer', async (_e, { targetAddress, targetPort = 49152, pairingPort = 7891, targetDeviceId, file } = {}) => {
     if (!targetAddress || !targetDeviceId || !file?.path) return { ok: false, reasonCode: 'PARAMS_INVALID' };
     const identity = loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), {});
     const transferId = `transfer_${crypto.randomBytes(12).toString('hex')}`;
     let real = file;
     try {
-      // 文件夹：先在本地打包为 zip 再传输（无大小限制）
+      // 文件夹默认用无压缩 tar 容器流式传输，接收端校验后还原目录；可在设置中改为 ZIP。
       if (file.kind === 'folder') {
-        const zipPath = path.join(TRANSFER_DIR, 'tmp', `${transferId}.zip`);
-        fs.mkdirSync(path.dirname(zipPath), { recursive: true });
-        runCmd(IS_WIN ? 'tar' : '/usr/bin/zip', IS_WIN ? ['-a', '-c', '-f', zipPath, file.path] : ['-r', '-q', zipPath, file.path], { timeout: 600000 });
-        const st = fs.statSync(zipPath);
-        real = { path: zipPath, name: `${file.name}.zip`, kind: 'file', size: st.size, sha256: await hashFile(zipPath) };
+        const { compressFolders, cacheDir } = transferSettings();
+        const extension = compressFolders ? 'zip' : 'tar';
+        const bundlePath = path.join(cacheDir, 'tmp', `${transferId}.${extension}`);
+        fs.mkdirSync(path.dirname(bundlePath), { recursive: true });
+        if (compressFolders) {
+          runCmd(IS_WIN ? 'tar' : '/usr/bin/zip', IS_WIN ? ['-a', '-c', '-f', bundlePath, file.path] : ['-r', '-q', bundlePath, file.path], { timeout: 600000 });
+        } else {
+          runCmd(IS_WIN ? 'tar' : '/usr/bin/tar', ['-cf', bundlePath, '-C', file.path, '.'], { timeout: 600000 });
+        }
+        const st = fs.statSync(bundlePath);
+        real = { path: bundlePath, name: compressFolders ? `${file.name}.zip` : file.name, kind: 'folder', folderMode: compressFolders ? 'zip' : 'raw', temporary: true, size: st.size, sha256: await hashFile(bundlePath) };
       }
       // 1) 挑战：对端只对已配对（可信公钥）设备签发
-      const chResp = await globalThis.fetch(`http://${targetAddress}:${Number(targetPort) - 1}/api/pair/transfer-challenge`, {
+      const chResp = await globalThis.fetch(`http://${targetAddress}:${Number(pairingPort)}/api/pair/transfer-challenge`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ senderId: identity.deviceId, transferId }),
       });
       const ch = await chResp.json();
-      if (!chResp.ok || !ch.signedChallenge) return { ok: false, reasonCode: chResp.status === 403 ? 'UNTRUSTED' : 'CHALLENGE_FAILED', error: ch.error };
+      if (!chResp.ok || !ch.challenge) {
+        if (real?.temporary) { try { fs.unlinkSync(real.path); } catch { /* ignore */ } }
+        return { ok: false, reasonCode: chResp.status === 403 ? 'UNTRUSTED' : 'CHALLENGE_FAILED', error: ch.error };
+      }
       // 2) manifest + offer（token 供分块/状态鉴权）
       const manifest = {
         transferId, senderId: identity.deviceId, receiverId: String(targetDeviceId),
         senderPublicKey: identity.identity?.publicKey || '',
         name: real.name, kind: real.kind, size: real.size,
         chunkSize: TRANSFER_CHUNK, chunkCount: Math.max(1, Math.ceil(real.size / TRANSFER_CHUNK)),
-        sha256: real.sha256,
+        sha256: real.sha256, folderMode: real.folderMode || '',
       };
       const token = crypto.randomBytes(24).toString('hex');
+      const signedChallenge = require('../core/transfer').signTransferChallenge(
+        ch.challenge,
+        fs.readFileSync(path.join(DATA_DIR, 'device.json.private.pem'), 'utf8')
+      );
       const offResp = await globalThis.fetch(`http://${targetAddress}:${targetPort}/api/transfer/offer`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ manifest, signedChallenge: ch.signedChallenge, senderName: identity.deviceName || identity.deviceId }),
+        body: JSON.stringify({ manifest, signedChallenge, senderName: identity.deviceName || identity.deviceId }),
       });
       const off = await offResp.json();
-      if (!offResp.ok) return { ok: false, reasonCode: 'OFFER_REJECTED', error: off.error };
-      transferSends.set(transferId, { transferId, file: real, host: targetAddress, port: targetPort, token, state: 'queued', sent: 0, total: real.size, chunkCount: manifest.chunkCount, error: '' });
+      if (!offResp.ok) {
+        if (real?.temporary) { try { fs.unlinkSync(real.path); } catch { /* ignore */ } }
+        return { ok: false, reasonCode: 'OFFER_REJECTED', error: off.error };
+      }
+      transferSends.set(transferId, { transferId, file: real, host: targetAddress, port: targetPort, token, state: 'queued', sent: 0, total: real.size, chunkCount: manifest.chunkCount, error: '', createdAt: Date.now() });
       // 3) 后台分块推送
       pumpTransfer(transferSends.get(transferId));
       return { ok: true, transferId, name: real.name, size: real.size, kind: real.kind };
     } catch (error) {
+      if (real?.temporary) { try { fs.unlinkSync(real.path); } catch { /* ignore */ } }
       return { ok: false, reasonCode: 'FAILED', error: String(error?.message || error) };
     }
   });
   // 分块推送（主进程后台执行，不阻塞 UI）
   async function pumpTransfer(info) {
     if (!info || info.state === 'sending') return;
-    info.state = 'sending';
+    info.state = 'waiting';
     try {
+      const waitUntil = Date.now() + 10 * 60 * 1000;
+      while (Date.now() < waitUntil) {
+        const response = await globalThis.fetch(`http://${info.host}:${info.port}/api/transfer/status/${encodeURIComponent(info.transferId)}`, { headers: { Authorization: `Bearer ${info.token}` } });
+        const status = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(status.error || '无法读取接收状态');
+        if (status.state === 'accepted') break;
+        if (status.state === 'cancelled') throw new Error('接收方已拒绝传输');
+        if (['failed', 'completed'].includes(status.state)) throw new Error(status.error || `接收端状态异常：${status.state}`);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      if (Date.now() >= waitUntil) throw new Error('等待接收确认超时');
+      info.state = 'sending';
       const fd = fs.openSync(info.file.path, 'r');
       try {
         for (let i = 0; i < info.chunkCount; i += 1) {
@@ -697,24 +793,35 @@ function registerIpc() {
       info.state = 'error';
       info.error = String(error?.message || error);
       logEvent('error', 'transfer', `发送 ${info.file.name} 失败: ${info.error}`);
+    } finally {
+      if (info.file.temporary) { try { fs.unlinkSync(info.file.path); } catch { /* ignore */ } }
+      saveTransferHistory();
     }
   }
   // 本机发送任务进度
-  ipcMain.handle('transfer:sends', () => [...transferSends.entries()].map(([id, s]) => ({ transferId: id, name: s.file.name, state: s.state, sent: s.sent, total: s.total, error: s.error })));
+  ipcMain.handle('transfer:sends', () => [...transferSends.entries()].map(([id, s]) => ({ transferId: id, name: s.file.name, state: s.state, sent: s.sent, total: s.total, error: s.error, createdAt: s.createdAt })).sort((a, b) => b.createdAt - a.createdAt));
+  ipcMain.handle('transfer:removeSend', (_e, transferId) => {
+    const item = transferSends.get(String(transferId || ''));
+    if (!item) return { ok: false, reasonCode: 'NOT_FOUND' };
+    if (!['done', 'error'].includes(item.state)) return { ok: false, reasonCode: 'TRANSFER_ACTIVE' };
+    transferSends.delete(item.transferId);
+    saveTransferHistory();
+    return { ok: true };
+  });
   // 接收端：待接收提议列表
   ipcMain.handle('transfer:listOffers', () => {
     if (!transferServer) return [];
     return [...transferServer.sessions.entries()]
-      .filter(([, st]) => st.state === 'offered')
-      .map(([id, st]) => ({ transferId: id, senderName: st.senderName, name: st.manifest.name, kind: st.manifest.kind, size: st.manifest.size }));
+      .filter(([, st]) => !['cancelled'].includes(st.state))
+      .map(([id, st]) => ({ transferId: id, senderName: st.senderName, name: st.manifest.name, kind: st.manifest.kind, size: st.manifest.size, state: st.state }));
   });
   // 接收端：接受（选目录）/ 拒绝
-  ipcMain.handle('transfer:decide', async (_e, { transferId, accept = false, targetDir = '' } = {}) => {
+  ipcMain.handle('transfer:decide', async (_e, { transferId, accept = false } = {}) => {
     if (!transferServer) return { ok: false, reasonCode: 'NO_SERVER' };
     const st = transferServer.sessions.get(String(transferId || ''));
     if (!st) return { ok: false, reasonCode: 'SESSION_NOT_FOUND' };
-    let dir = targetDir;
-    if (accept && !dir) {
+    let dir = '';
+    if (accept) {
       const picked = await dialog.showOpenDialog({ properties: ['openDirectory'], title: '选择接收目录' });
       if (picked.canceled || !picked.filePaths[0]) return { ok: false, reasonCode: 'CANCELLED' };
       dir = picked.filePaths[0];
@@ -730,7 +837,7 @@ function registerIpc() {
     const st = transferServer?.sessions?.get(id);
     const sd = transferSends.get(id);
     return {
-      server: st ? { state: st.state, targetDir: st.state === 'completed' ? st.targetDir : undefined } : null,
+      server: st ? { state: st.state, targetDir: st.state === 'completed' ? st.targetDir : undefined, targetFile: st.state === 'completed' ? st.targetFile : undefined, error: st.error || '' } : null,
       send: sd ? { state: sd.state, sent: sd.sent, total: sd.total, error: sd.error } : null,
     };
   });
@@ -741,7 +848,7 @@ function registerIpc() {
     const ports = normalizeServicePorts({ transfer: transferServer?.port || DEFAULT_PORTS.transfer });
     const checkTcp = (port) => new Promise((resolve) => { const socket = net.createConnection({ host: '127.0.0.1', port }); socket.once('connect', () => { socket.destroy(); resolve(true); }); socket.once('error', () => resolve(false)); socket.setTimeout(300, () => { socket.destroy(); resolve(false); }); });
     const checkUdp = (port) => new Promise((resolve) => { const socket = dgram.createSocket('udp4'); socket.once('listening', () => { socket.close(() => resolve(false)); }); socket.once('error', (error) => { socket.close(() => resolve(error.code === 'EADDRINUSE')); }); socket.bind(port, '127.0.0.1'); });
-    const result = []; for (const [name, port] of Object.entries(ports)) { const check = RANGES[name] === 'udp' ? checkUdp : checkTcp; const occupied = await check(port); const expected = name === 'chat' ? Boolean(chatInfo?.port === port) : name === 'pairing' ? Boolean(pairingServer?.port === port) : name === 'transfer' ? Boolean(transferServer?.port === port) : name === 'sync' ? Boolean(syncService?.port() === port) : false; const item = describePort(name, port, occupied, expected); if (occupied && !expected) { for (let candidate = port + 1; candidate < Math.min(port + 100, 65536); candidate += 1) { if (!(await check(candidate))) { item.suggestedPort = candidate; break; } } } result.push(item); } return { ports, services: result, checkedAt: new Date().toISOString() };
+    const result = []; for (const [name, port] of Object.entries(ports)) { const check = RANGES[name] === 'udp' ? checkUdp : checkTcp; const occupied = await check(port); const expected = name === 'discovery' ? Boolean(discoveryService?.port === port) : name === 'chat' ? Boolean(chatInfo?.port === port) : name === 'pairing' ? Boolean(pairingServer?.port === port) : name === 'transfer' ? Boolean(transferServer?.port === port) : name === 'sync' ? Boolean(syncService?.port() === port) : false; const item = describePort(name, port, occupied, expected); if (occupied && !expected) { for (let candidate = port + 1; candidate < Math.min(port + 100, 65536); candidate += 1) { if (!(await check(candidate))) { item.suggestedPort = candidate; break; } } } result.push(item); } return { ports, services: result, checkedAt: new Date().toISOString() };
   });
   ipcMain.handle('pairing:pending', () => pairingServer?.pending?.() || []);
   ipcMain.handle('pairing:confirmIncoming', (_e, { sessionId, code } = {}) => { const result = pairingServer?.confirm?.(sessionId, code) || { ok: false, reasonCode: 'PAIRING_SERVICE_UNAVAILABLE' }; if (result.ok) credentialStore.set(result.remoteDeviceId, JSON.stringify({ authorization: result.authorization, fingerprint: result.remoteFingerprint, publicKey: result.remotePublicKey || '' })); return result; });
@@ -779,18 +886,17 @@ function registerIpc() {
     if (response.ok && body.state === 'accepted' && session.remoteDeviceId) credentialStore.set(session.remoteDeviceId, JSON.stringify({ authorization: body.authorization || null, fingerprint: body.identityFingerprint || '', publicKey: body.identityPublicKey || '', pairedAt: new Date().toISOString() })); return response.ok ? { ok: true, ...body } : { ok: false, reasonCode: 'STATUS_UNAVAILABLE' }; } catch { return { ok: false, reasonCode: 'REMOTE_UNREACHABLE' }; } });
   ipcMain.handle('discovery:list', async () => {
     await startTransfer();
-    const identity = loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), { platform: PLATFORM, platformVersion: os.release(), deviceType: IS_WIN ? 'desktop' : 'laptop', deviceName: os.hostname(), network: { addresses: getLocalIPs().map((n) => ({ address: n.ip, interfaceName: n.iface, family: 'IPv4' })) }, config: {}, services: { chat: IS_WIN, pairing: { port: 7891 }, transfer: { port: transferServer?.port || 49152 } }, trusted: false });
-    const local = buildLocalDevice(identity);
+    const local = buildRuntimeLocalDevice();
     if (!discoveryService) discoveryService = startDiscovery(local, { port: normalizeServicePorts(loadSettings().servicePorts || {}).discovery });
-    return discoveryService.list().map((device) => { try { const saved = JSON.parse(credentialStore.get(device.deviceId) || '{}'); if (!saved.fingerprint) return device; return { ...device, trust: { ...device.trust, state: saved.fingerprint === device.identity?.fingerprint ? 'trusted' : 'identity_changed' } }; } catch { return device; } });
-  });
-  ipcMain.handle('device:info', () => {
-    const identity = loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), {
-      platform: PLATFORM, platformVersion: os.release(), deviceType: IS_WIN ? 'desktop' : 'laptop',
-      deviceName: os.hostname(), config: {}, services: { chat: IS_WIN, pairing: { port: 7891 }, transfer: { port: transferServer?.port || 49152 } }, trusted: false,
+    else discoveryService.updateLocal(local);
+    return discoveryService.list().map((device) => {
+      if (device.deviceId === local.deviceId) return local;
+      let trustState = 'unpaired';
+      try { const saved = JSON.parse(credentialStore.get(device.deviceId) || '{}'); if (saved.fingerprint) trustState = saved.fingerprint === device.identity?.fingerprint ? 'trusted' : 'identity_changed'; } catch { /* 损坏凭据按未配对处理 */ }
+      return { ...device, trust: { ...device.trust, state: trustState }, capabilities: resolveAdvertisedCapabilities(device, trustState === 'trusted') };
     });
-    return buildLocalDevice(identity);
   });
+  ipcMain.handle('device:info', () => buildRuntimeLocalDevice());
   // 系统信息
   ipcMain.handle('sys:info', () => ({
     platform: PLATFORM,
@@ -1263,7 +1369,13 @@ function registerIpc() {
 
   // ---- 文件同步（多任务：一次配置 = 一条同步任务，运行中不可改配置） ----
   ipcMain.handle('sync:state', () => syncService?.getState() || null);
-  ipcMain.handle('sync:task:add', (_e, patch = {}) => syncService.addTask(patch));
+  ipcMain.handle('sync:task:add', async (_e, patch = {}) => {
+    const task = syncService.addTask(patch);
+    if (task.role !== 'master' || !task.peerDeviceId || !task.peerAddress) return task;
+    const invitation = await syncService.inviteTask(task.id);
+    return { ...task, invitation };
+  });
+  ipcMain.handle('sync:task:invite', (_e, id) => syncService.inviteTask(id));
   ipcMain.handle('sync:task:update', (_e, { id, patch = {} } = {}) => syncService.updateTask(id, patch));
   ipcMain.handle('sync:task:remove', (_e, id) => syncService.removeTask(id));
   ipcMain.handle('sync:task:start', (_e, id) => syncService.startTask(id));
@@ -1294,15 +1406,7 @@ function registerIpc() {
   const saveWolTargets = (data) => { fs.mkdirSync(path.dirname(wolConfigFile), { recursive: true }); fs.writeFileSync(wolConfigFile, JSON.stringify(data, null, 2)); };
 
   ipcMain.handle('wol:localNics', () => {
-    const nics = [];
-    for (const [name, infos] of Object.entries(os.networkInterfaces())) {
-      for (const info of infos || []) {
-        if (!info.mac || info.mac === '00:00:00:00:00:00' || info.internal) continue;
-        nics.push({ name, mac: info.mac, address: info.address, family: info.family });
-        break; // 同一网卡只取一条
-      }
-    }
-    return nics;
+    return listPhysicalNics();
   });
   ipcMain.handle('wol:list', () => {
     const targets = loadWolTargets();
@@ -1483,6 +1587,41 @@ function trustedDevicePublicKey(deviceId) {
   }
 }
 
+let cachedAdminState;
+function buildRuntimeLocalDevice() {
+  const configured = normalizeServicePorts(loadSettings().servicePorts || {});
+  if (IS_WIN && cachedAdminState === undefined) cachedAdminState = isAdmin();
+  const physicalNics = listPhysicalNics();
+  const runtime = {
+    platform: PLATFORM,
+    platformVersion: os.release(),
+    deviceType: IS_WIN ? 'desktop' : 'laptop',
+    deviceName: os.hostname(),
+    network: { addresses: getLocalIPs().map((n) => ({ address: n.ip, interfaceName: n.iface, family: 'IPv4' })) },
+    config: { wolTarget: physicalNics.length > 0 },
+    // services 是发现协议需要的端点；capabilityServices 是“功能此刻是否能工作”的运行态。
+    services: {
+      chat: chatInfo ? { port: chatInfo.port } : false,
+      pairing: { port: pairingServer?.port || configured.pairing },
+      transfer: transferServer ? { port: transferServer.port } : false,
+      sync: syncService?.port?.() ? { port: syncService.port() } : false,
+    },
+    capabilityServices: {
+      chat: true,
+      fileSend: Boolean(transferServer),
+      fileReceive: Boolean(transferServer),
+      smbShare: Boolean(IS_WIN && cachedAdminState),
+      smbMount: IS_MAC,
+      shareSync: Boolean(syncService),
+      wolSender: true,
+      wolTarget: physicalNics.length > 0,
+    },
+    trusted: true,
+  };
+  const identity = loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), runtime);
+  return buildLocalDevice({ ...identity, ...runtime });
+}
+
 async function startTransfer() {
   if (transferServer) return transferServer;
   const configured = normalizeServicePorts(loadSettings().servicePorts || {});
@@ -1497,7 +1636,25 @@ async function startTransfer() {
   };
   transferServer = await startTransferServer({
     port: configured.transfer,
-    root: TRANSFER_DIR,
+    root: transferSettings().cacheDir,
+    finalizeReceived: ({ tmp, state, availableTarget }) => {
+      if (state.manifest.kind !== 'folder' || state.manifest.folderMode !== 'raw') {
+        const targetFile = availableTarget(state.targetDir, state.manifest.name);
+        fs.renameSync(tmp, targetFile);
+        return targetFile;
+      }
+      assertSafeTarEntries(tmp);
+      const targetDir = availableDirectory(state.targetDir, state.manifest.name);
+      fs.mkdirSync(targetDir, { recursive: true });
+      try {
+        runCmd(IS_WIN ? 'tar' : '/usr/bin/tar', ['-xf', tmp, '-C', targetDir], { timeout: 600000 });
+        fs.unlinkSync(tmp);
+        return targetDir;
+      } catch (error) {
+        fs.rmSync(targetDir, { recursive: true, force: true });
+        throw error;
+      }
+    },
     verifyOfferChallenge: (signed, manifest) => {
       try {
         const trustedPub = trustedDevicePublicKey(String(manifest.senderId || ''));

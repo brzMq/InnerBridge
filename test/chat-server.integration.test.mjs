@@ -36,6 +36,7 @@ async function postMessage(body) {
 test('消息接口支持幂等发送、可信回复快照和搜索', async () => {
   const firstBody = {
     clientId: 'client_msg_0001',
+    requesterId: 'dev_chat_tester_00000000000000000000000',
     nick: 'Alice',
     text: '部署完成',
   };
@@ -50,6 +51,7 @@ test('消息接口支持幂等发送、可信回复快照和搜索', async () =>
 
   const reply = await postMessage({
     clientId: 'client_msg_0002',
+    requesterId: 'dev_chat_tester_00000000000000000000000',
     nick: 'Bob',
     text: '收到',
     replyTo: { id: 1, nick: '不能信任的昵称' },
@@ -62,7 +64,7 @@ test('消息接口支持幂等发送、可信回复快照和搜索', async () =>
 
 test('压缩文件上传保留类型、名称和大小元数据', async () => {
   const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
-  const uploadResponse = await fetch(`${info.url}/api/upload?name=${encodeURIComponent('项目资料.zip')}`, {
+  const uploadResponse = await fetch(`${info.url}/api/upload?name=${encodeURIComponent('项目资料.zip')}&requesterId=dev_chat_tester_00000000000000000000000`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/zip' },
     body: bytes,
@@ -75,6 +77,7 @@ test('压缩文件上传保留类型、名称和大小元数据', async () => {
 
   const sent = await postMessage({
     clientId: 'client_archive_0001',
+    requesterId: 'dev_chat_tester_00000000000000000000000',
     nick: 'Alice',
     text: '',
     file: { url: upload.url, name: upload.name, kind: upload.kind, size: upload.size },
@@ -87,7 +90,11 @@ test('压缩文件上传保留类型、名称和大小元数据', async () => {
   });
 });
 
-test('手机页面使用本地 JSZip 资源', async () => {
+test('手机页面使用本地 JSZip，并为消息和上传携带稳定设备身份', async () => {
+  const html = await fetch(`${info.url}/`).then((r) => r.text());
+  assert.match(html, /inner-net-web-device-id/);
+  assert.match(html, /requesterId:\s*requesterId/);
+  assert.match(html, /requesterId=' \+ encodeURIComponent\(requesterId\)/);
   const response = await fetch(`${info.url}/vendor/jszip.min.js`);
   assert.equal(response.status, 200);
   assert.match(response.headers.get('content-type'), /javascript/);

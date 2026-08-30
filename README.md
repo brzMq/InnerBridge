@@ -1,6 +1,6 @@
 # InnerNet 内网共享（统一源码版）
 
-> InnerNet 2.0 开发线：P0-P2 已完成并有双机发现记录；P3 安全配对已完成代码与自动化验证，等待 Windows/macOS 双机 Gate 验收。1.0 稳定功能保持兼容。
+> InnerNet 2.0 开发线：P0-P5 功能已在代码中实现并通过自动化验证（131 项测试全绿）。P3 安全配对已完成真实双机验收与公钥留存；P4 传输安全信道（Ed25519 挑战签名）已重构完整链路（提议/接收确认/发送队列/文件夹 zip 打包），双机真机端到端验证仍属 P6；P5 局域网设备「访问过本机的设备」只读展示与远程唤醒（WOL）已实现。1.0 稳定功能保持兼容；P6 集成/发布打包尚未开始。
 
 同一套源码同时支持 Windows 共享端和 macOS 挂载端。应用根据运行平台自动显示对应功能，不再维护两份代码。
 
@@ -9,7 +9,7 @@
 - 2.0 独立维护目录：`/Users/brz/MyProject/innerNet-2.0.0`
 - 1.0 目录和旧目录仅作历史参考，不再双向同步代码。
 - 干净源码约 1 MB，不包含依赖、构建产物、用户配置或运行日志。
-- Node.js 24.19.0 + Electron 44 环境下，当前 `npm run check` 通过：ESLint、46 项测试（含群聊、发现、配对与传输测试）和前端构建。
+- Node.js 24.19.0 + Electron 44 环境下，当前 `npm run check` 通过：ESLint、131 项测试（含群聊、发现、配对、传输、同步、WOL 与访问日志测试）和前端构建。
 
 ## 从零开始
 
@@ -24,7 +24,7 @@
 Windows 共享端请在“管理员 PowerShell”中执行：
 
 ```powershell
-cd F:\VibeCoding\inner-net-unified
+cd C:\path\to\innerNet-2.0.0
 npm install
 npm run runtime:check
 npm run dev
@@ -33,7 +33,7 @@ npm run dev
 macOS 挂载端请在终端中执行：
 
 ```bash
-cd /path/to/inner-net-unified
+cd /path/to/innerNet-2.0.0
 npm install
 npm run runtime:check
 npm run dev
@@ -53,22 +53,44 @@ Electron 44 的 npm 包不再依赖 `postinstall` 自动下载二进制，因此
 ## 项目结构
 
 ```text
-inner-net-unified/
+innerNet-2.0.0/
 ├── electron/                 # Electron 主进程、IPC、SMB、群聊与安全服务
-│   ├── main.js               # 按 Windows/macOS 启用对应能力
-│   ├── preload.js             # 安全暴露 IPC API
+│   ├── main.js               # 按 Windows/macOS 启用对应能力，注册全部 IPC
+│   ├── preload.js             # 安全暴露 IPC API（host/sync/lan/wol/revocation 等）
 │   ├── smb-mount.js           # macOS SMB 挂载与 LaunchAgent 脚本
 │   ├── windows-share-acl.js   # Windows principal/ACL 校验
-│   ├── chat-server.js         # HTTP/SSE 群聊与附件服务
-│   └── chat-storage.js        # 聊天记录统计和缓存清理
+│   ├── chat-server.js         # HTTP/SSE 群聊、附件与共享清单接口
+│   ├── chat-storage.js        # 聊天记录统计和缓存清理
+│   ├── discovery-service.js    # UDP 49321 设备发现（定向子网广播）
+│   ├── pairing.js / pairing-coordinator.js / pairing-relay.js / pairing-protocol.js
+│   │                         # P3 配对服务、协调、转发与协议
+│   ├── transfer-server.js / transfer-client.js
+│   │                         # P4 原生传输服务端与客户端
+│   ├── sync-server.js / sync-service.js
+│   │                         # 文件夹同步：从端 HTTP 端点 + 主端编排（端口 7892）
+│   ├── wol-service.js         # P5 远程唤醒 UDP 广播与上线探测
+│   └── security/             # 安全辅助模块
+├── core/                     # 跨平台纯逻辑（便于测试）
+│   ├── device-schema.js / device-identity.js / capability-resolver.js / discovery.js
+│   ├── light-auth.js         # Ed25519 挑战签发与验签（清单/传输/同步共用）
+│   ├── credential-store.js    # 配对凭据与主机 SMB 密码（同套加密）
+│   ├── revocation.js          # P3 解除配对撤销凭据签发/验签
+│   ├── transfer.js            # P4 传输授权与 manifest
+│   ├── sync-engine.js         # 文件夹同步纯函数（扫描/差异/回收区/退避/失败补偿）
+│   ├── access-log.js          # 设备中心「访问过本机的设备」只读记录
+│   └── wol.js                 # P5 魔术包构造与 WOL 状态机
 ├── src/                      # React 渲染进程
-│   ├── App.jsx               # 平台路由和页签
-│   ├── components/           # 共享、挂载、群聊、日志界面
+│   ├── App.jsx               # 平台路由和页签（含「文件夹同步」）
+│   ├── components/           # 共享/挂载/群聊/传输/同步/设备中心/日志/服务设置
+│   │   ├── ShareManager.jsx / MountManager.jsx
+│   │   ├── DeviceCenter.jsx  # 含局域网其他设备区与 WOL 配置
+│   │   ├── SyncPage.jsx       # 文件夹同步配置与状态
+│   │   └── ...
 │   └── styles.css             # 公共主题与布局
-├── test/                     # Node 原生单元/集成测试
+├── test/                     # Node 原生单元/集成测试（27 个文件，131 项用例）
 ├── scripts/                  # 运行环境检查和打包辅助脚本
 ├── build/                    # 图标和 macOS 打包脚本
-├── docs/                     # 从零开始、架构、群聊和版本排障文档
+├── docs/                     # 从零开始、架构、联调与版本排障文档
 ├── package.json              # Node 24/Electron 44 依赖、6300 端口与命令
 ├── package-lock.json         # 唯一依赖锁文件
 ├── .nvmrc / .node-version    # Node.js v24.19.0
@@ -79,8 +101,17 @@ inner-net-unified/
 ## 两端职责
 
 - Windows：创建 SMB 共享、校验/修复共享 ACL、提供已签名的共享清单接口和群聊服务。
-- macOS：通过轻量 API 拉取共享清单，手动挂载或安装用户级 LaunchAgent 自动挂载。
-- 公共：React 界面、聊天、日志、配置格式和测试共用一份代码。
+- macOS：通过轻量 API 拉取共享清单，手动挂载或安装用户级 LaunchAgent 自动挂载；可按主机维护统一 SMB 密码；新共享可在「自动挂载」轮询中自动挂载（每 60 秒检查已配对在线设备的新共享，需主机统一密码）。
+- 公共能力（两端都可发起或参与）：设备发现、安全配对、P2P 传输（提议/接收确认/发送队列/文件夹 zip 打包）、文件夹同步（多任务、单向主从、配对码关联、失败补偿、停止联动）、访问过本机设备只读记录、远程唤醒（WOL）。
+- 公共：React 界面、聊天（实名，必须携带本机 deviceId）、日志、配置格式和测试共用一份代码。
+
+## 主机 SMB 密码维护（Mac 端）
+
+- Windows 必须创建本地 SMB 账号并设密码，Mac 才能挂载；Mac 端按**主机**维护统一密码，N 个共享只填一次。
+- 主机账号维护区可「设置/更新/删除」统一密码；更新时自动覆盖该主机所有共享的 `password`；缺省时挂载自动回退到主机密码。
+- 同步来的新共享 `password` 为空也能挂载（用主机密码）。
+- Windows 端共享卡片密码默认 `••••••••` 遮罩，眼睛按钮可临时显示，「复制连接信息」仍复制真实密码。
+- 凭据存于 `hostCredentials.json`，与配对凭据使用同一套加密。
 
 ## 共享清单同步（轻量 API）
 
@@ -99,7 +130,29 @@ inner-net-unified/
   对端离线时本机照样立即生效，对方下次操作被拒时会自动降级，不会长期停留在「已信任」的假象上。
 - 成功后以稳定的 Ed25519 公钥指纹识别可信设备；发现到同一 `deviceId` 但指纹变化时，设备中心会阻断敏感操作并要求解除后重新配对。
 - 私钥不进入公开设备资料或发现广播；发现广播仅携带公钥指纹摘要。
-- 真实双机配对仍待验收，步骤见 [docs/P3-双机配对联调说明.md](docs/P3-双机配对联调说明.md)。
+- P3 真实双机配对已完成验收，配对时双向留存对端 Ed25519 公钥（`/api/pair/status` 回传 `identityPublicKey`），解除配对的撤销凭据可正确验签。双机步骤见 [docs/P3-双机配对联调说明.md](docs/P3-双机配对联调说明.md)。
+
+## 文件夹同步（多任务、单向主从、配对码、失败补偿、停止联动）
+
+- 在「文件同步」页签以**任务**为单位管理：一次配置 = 一条同步任务，支持多条任务并存（各自目录、对端、忽略规则、启停状态独立）。
+- **配对码**：主端任务自动生成 6 位 pairKey，从端任务表单填写此码；请求统一注入 pairKey，从端按 pairKey 匹配（解决两端任务 id 各自独立导致 404 的问题）。单条无码从端任务兜底兼容旧迁移。
+- **同步邀请**：主端新建任务并指定从端后，通过已配对 Ed25519 身份发送签名邀请；从端自动切到文件同步页并打开预填表单，任务名、从端角色、配对码、主端设备/IP/端口均自动填写，只需选择从端目录。
+- **运行中锁定**：`updateTask`/`removeTask` 仅在任务停止时允许；界面运行中显示 🔒 配置已锁定，按角色与运行态解锁「立即同步/清空索引/回收区」。
+- **实时**：主端 `fs.watch` 递归监听 + 800ms 防抖；另设 5 分钟全量校验（size+mtime 比对）抗事件丢失。
+- **失败补偿**：`carryFailures` —— 推送失败（重试耗尽）的文件在索引中保留旧快照（新文件不写入），下一轮 diff 自动重推；任务卡片显示「待补偿 N 个文件」。
+- **停止联动**：主端或从端停止任务 → POST `/api/sync/notify`（签名鉴权）即时通知另一端；对端在当前页签上方弹出必须手动关闭的提示框，并在任务历史保留记录。`runCycle` 循环检查 `enabled` 支持中途取消。
+- **回收区**：主端删除的文件在从端移入 `.innernet-trash/<时间戳>/<原路径>/`，默认保留 7 天，可手动恢复或清空；从端多余文件也在全量轮清进回收区。
+- **鉴权**：复用配对 Ed25519 公钥验签（与共享清单同一套机制），未配对设备拿不到挑战。
+- **分块**：大文件按 4MB 分块传输，每块独立校验，断点续传靠 missing 列表。
+- 端口 `7892`，已纳入服务健康检查。从端目录勿落在 SMB 挂载卷上（`fs.watch` 网络卷不可靠）。
+
+## 局域网设备访问记录与远程唤醒（P5）
+
+- **访问过本机的设备**：设备中心只读记录访问过本机服务的设备（拉取共享清单、群聊发言、文件同步请求时记录 requesterId+IP+来源），**不主动扫描、不对任何设备发包**；仅显示与本机产生过实际交互的设备。
+- **远程唤醒（WOL）**：为已配对设备配置目标 MAC 与广播地址后，离线时可发魔术包（6×FF + MAC×16，UDP 广播，每地址 3 次）；随后轮询探测对端上线（最长 30 秒），成功自动标记「已验证可唤醒」。
+- 本机网卡 MAC 可在设备中心复制，供对端配置唤醒用；目标配置按 `deviceId` 存本机 `wol-targets.json`，不进发现广播。
+- 按设计文档 §10 诚实原则：未配置不显示可唤醒；未验证明确标注「尚未实际验证」；唤醒失败给具体排查（电源/BIOS/有线网络）。
+- 软件已实现并自动化验证；真实硬件关机唤醒需用户在有 WOL 支持的设备上执行一次（成功后 App 自动记录 verified）。
 
 ## 群聊能力
 
@@ -107,16 +160,27 @@ inner-net-unified/
 - 桌面端与手机网页均可选择文件夹，客户端压缩为 ZIP 后传输；最多 500 个文件、原始/压缩后均不超过 200MB。
 - 支持把文件或文件夹直接拖入聊天区域；附件入口已精简为一个按钮，菜单中选择文件/图片或文件夹。
 - 文本白名单覆盖常见代码、配置、数据、脚本和文档格式；图片支持 PNG、JPEG、GIF、WebP、BMP、TIFF、ICO、AVIF、HEIC 等常见格式。
+- **实名进入群聊**：`/api/msg` 必须携带本机 `deviceId`（作为 `requesterId`），匿名请求被服务端拒绝（400）；昵称默认为本机设备名，避免局域网内冒名发言。
 - 消息回复与可信引用快照。
 - 最近 200 条消息搜索。
 - SSE 实时消息、在线人数和 20 秒心跳。
 - `clientId` 幂等发送，避免重复点击或网络重试产生重复消息。
 - 桌面端和手机网页共用同一服务协议。
 - Windows 共享端提供聊天记录与缓存管理窗口，可统计占用、查看消息和缓存的本机路径、清空记录、回收无引用附件或全部清空；管理操作仅通过本机 Electron IPC 开放。
-- Windows 普通权限启动会显示红色权限警告；共享卡片的“复制连接信息”输出与导出清单相同的 JSON，可直接在 Mac 端导入。
+- Windows 普通权限启动会显示红色权限警告；共享卡片的"复制连接信息"输出与导出清单相同的 JSON，可直接在 Mac 端导入。
 - 群聊 P1-P2：未读计数/系统通知、@昵称高亮、Windows 本地 JSON/Markdown 历史导出，以及按消息 ID 删除管理。
 
-当前 1.0 版本以现有功能为基线；历史问题、Electron 按需下载和端口说明见 [docs/版本更迭.md](docs/版本更迭.md)。
+2.0 以 1.0 稳定功能为基线并扩展了安全配对、P2P 传输（已重构完整链路）、文件夹同步（多任务 + 配对码 + 失败补偿 + 停止联动）与远程唤醒；历史问题、Electron 按需下载和端口说明见 [docs/版本更迭.md](docs/版本更迭.md)。
+
+## P2P 传输（P4，已重构完整链路）
+
+- 三块布局：「我要发送 / 我要接收 / 设置」（`src/components/TransferPage.jsx`）。
+- **挑战按配对公钥签发与校验**：接收端服务端用本机 Ed25519 私钥签发挑战，发送端用配对留存的公钥校验；不再依赖易过期的配对会话令牌。
+- **token 鉴权**：offer 时签发 Bearer token，分块与状态接口凭此鉴权；`transferId` 绑定双方设备、配对授权和有效期。
+- **IPC 已接通**：`transfer:offer / sends / listOffers / decide / status / selectFile`。
+- 文件夹自动打包为 ZIP 后发送，无文件大小限制（流式分块）。
+- 接收目录选择保留在本机 Electron IPC 边界，远端不能指定保存目录；落盘前 SHA-256 校验后原子移动。
+- 仍属 P6 待办：双机真机端到端大文件验证、真实吞吐测试。
 
 ## 验证与构建
 

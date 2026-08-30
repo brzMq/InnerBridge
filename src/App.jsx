@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import ShareManager from './components/ShareManager.jsx';
 import MountManager from './components/MountManager.jsx';
 import ChatPage from './components/ChatPage.jsx';
@@ -46,6 +46,9 @@ export default function App() {
   const [sys, setSys] = useState(null);
   const [tab, setTab] = useState('devices');
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || 'auto');
+  const [peerAlert, setPeerAlert] = useState(null);
+  const [syncInvitation, setSyncInvitation] = useState(null);
+  const contentRef = useRef(null);
 
   // 应用主题到 <html>
   useEffect(() => {
@@ -57,6 +60,33 @@ export default function App() {
 
   useEffect(() => {
     window.api.getSysInfo().then(setSys).catch(console.error);
+  }, []);
+
+  useEffect(() => { contentRef.current?.scrollTo({ top: 0 }); }, [tab]);
+
+  // 跨端重要事件提升到应用根层监听，确保用户停留在任意页签都能看到。
+  useEffect(() => {
+    const offRevoked = window.api.pairing?.onRevoked?.(({ deviceName, deviceId }) => {
+      setPeerAlert({
+        kind: 'pairing',
+        title: '设备配对已解除',
+        message: `「${deviceName || deviceId}」已解除与本机的配对。如需继续传输、同步或远程操作，请重新配对。`,
+      });
+    });
+    const offSync = window.api.sync?.onState?.((state) => {
+      if (state?.invitation) {
+        setSyncInvitation(state.invitation);
+        setTab('sync');
+        return;
+      }
+      if (!state?.notice) return;
+      setPeerAlert({
+        kind: 'sync',
+        title: '文件同步已由对端停止',
+        message: state.notice.message || `对端已停止同步任务「${state.notice.taskName || '未命名任务'}」。`,
+      });
+    });
+    return () => { offRevoked?.(); offSync?.(); };
   }, []);
 
   if (!sys) {
@@ -83,7 +113,7 @@ export default function App() {
             </p>
           </div>
         </div>
-        {isWin ? (
+        {isWin && (
           <div className="ipbar">
             {sys.ips.map((n) => (
               <span key={n.ip} className="chip">
@@ -93,10 +123,6 @@ export default function App() {
             <span className={`badge ${sys.isAdmin ? 'ok' : 'warn'}`}>
               {sys.isAdmin ? '管理员' : '普通权限'}
             </span>
-          </div>
-        ) : (
-          <div className="ipbar">
-            <span className="badge neutral">无需管理员</span>
           </div>
         )}
         <button
@@ -127,14 +153,14 @@ export default function App() {
           群聊
         </button>
         <button className={tab === 'transfer' ? 'on' : ''} onClick={() => setTab('transfer')}>P2P传输</button>
-        <button className={tab === 'sync' ? 'on' : ''} onClick={() => setTab('sync')}>文件夹同步</button>
+        <button className={tab === 'sync' ? 'on' : ''} onClick={() => setTab('sync')}>文件同步</button>
         <button className={tab === 'log' ? 'on' : ''} onClick={() => setTab('log')}>
           运行日志
         </button>
         <button className={tab === 'settings' ? 'on' : ''} onClick={() => setTab('settings')}>服务设置</button>
       </nav>
 
-      <main className="content">
+      <main className="content" ref={contentRef}>
         {tab === 'devices'
           ? <DeviceCenter />
           : tab === 'main'
@@ -148,9 +174,24 @@ export default function App() {
               : tab === 'transfer'
                 ? <TransferPage />
                 : tab === 'sync'
-                ? <SyncPage />
+                ? <SyncPage invitation={syncInvitation} onInvitationHandled={() => setSyncInvitation(null)} />
               : <LogPage />}
       </main>
+
+      {peerAlert && (
+        <div className="modal-mask app-alert-mask" role="presentation">
+          <div className="modal app-alert" role="alertdialog" aria-modal="true" aria-labelledby="peer-alert-title">
+            <span className={`app-alert-icon ${peerAlert.kind}`} aria-hidden="true">
+              {peerAlert.kind === 'pairing' ? '!' : '↕'}
+            </span>
+            <div className="app-alert-copy">
+              <h3 id="peer-alert-title">{peerAlert.title}</h3>
+              <p>{peerAlert.message}</p>
+            </div>
+            <button className="btn primary" autoFocus onClick={() => setPeerAlert(null)}>我知道了</button>
+          </div>
+        </div>
+      )}
     </div>
     </ErrorBoundary>
   );

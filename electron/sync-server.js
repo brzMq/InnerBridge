@@ -1,9 +1,13 @@
 /**
- * 文件夹同步的从端服务。
+ * 文件同步的从端服务（多任务版）。
  *
  * 与 P2P 传输（transfer-server）的区别：那边是「提议 → 接收端弹窗确认 → 分块」，
  * 需要人工点一次；同步要求无人值守，所以这里是一组免确认端点，
  * 鉴权改为复用配对时交换的 Ed25519 公钥验签（与共享清单接口同一套机制）。
+ *
+ * 多任务：本机可同时配置多条从端同步任务，共享同一个监听端口。
+ * 每个请求体携带 taskId，由 getTask(taskId) 解析出对应目录；
+ * 任务不存在返回 404，任务存在但已停止返回 409（主端据此提示「对端已停止」）。
  */
 const http = require('http');
 const fs = require('fs');
@@ -58,15 +62,25 @@ function makeAuthorized({ deviceId, lookupTrustedPublicKey }) {
   };
 }
 
-function startSyncServer({ port = 7892, host = '0.0.0.0', root, deviceId, lookupTrustedPublicKey, createChallenge, onEvent } = {}) {
+/**
+ * 解析请求中的任务：优先 pairKey（跨端配对码），兜底 taskId。
+ * 任务不存在 404；已停止 409。返回 null 时已经写完响应。
+ */
+function resolveTask(res, getTask, body) {
+  const key = String((body && (body.pairKey || body.taskId)) || '');
+  if (!key) { json(res, 400, { error: '缺少任务标识' }); return null; }
+  const task = typeof getTask === 'function' ? getTask(key) : null;
+  if (!task) { json(res, 404, { error: '同步任务不存在或已删除' }); return null; }
+  if (!task.localRoot) { json(res, 409, { error: '该同步任务已在从端停止' }); return null; }
+  return task;
+}
+
+function startSyncServer({ port = 7892, host = '0.0.0.0', deviceId, lookupTrustedPublicKey, createChallenge, onEvent, onNotify, onInvite, onAccess, getTask, getNotifyTask } = {}) {
   if (!deviceId) return Promise.reject(new Error('deviceId 未配置'));
-  if (!root) return Promise.reject(new Error('从端同步目录未配置'));
-  fs.mkdirSync(root, { recursive: true });
+  if (typeof getTask !== 'function') return Promise.reject(new Error('getTask 未配置'));
 
   const authorized = makeAuthorized({ deviceId, lookupTrustedPublicKey });
-  const sessions = new Map();
-  const incomingDir = path.join(root, INCOMING_DIR);
-  const trashDir = path.join(root, TRASH_DIR);
+  const sessions = new Map(); // transferId -> 会话（跨任务共享，transferId 全局唯一）
 
   const emit = (level, message) => { try { onEvent && onEvent({ level, source: 'sync', message }); } catch { /* 日志失败不影响同步 */ } };
 
@@ -79,30 +93,76 @@ function startSyncServer({ port = 7892, host = '0.0.0.0', root, deviceId, lookup
         const rid = String(requesterId || '');
         const stored = typeof lookupTrustedPublicKey === 'function' ? lookupTrustedPublicKey(rid) : null;
         if (!rid || !stored) return json(res, 403, { error: '设备未获信任' });
+        try { if (typeof onAccess === 'function') onAccess({ requesterId: rid, ip: req.socket.remoteAddress, kind: 'sync' }); } catch { /* 记录失败不影响业务 */ }
         return json(res, 200, createChallenge({ deviceId, requesterId: rid }));
       }
 
-      if (req.method === 'POST' && url.pathname === '/api/sync/list') {
-        const { signed, requesterId } = await readJson(req);
+      if (req.method === 'POST' && url.pathname === '/api/sync/notify') {
+        const body = await readJson(req);
+        const { signed, requesterId, event } = body;
         if (!authorized(signed, requesterId)) return json(res, 403, { error: '设备未获信任' });
+        const key = String(body.pairKey || body.taskId || '');
+        const task = typeof getNotifyTask === 'function' ? getNotifyTask(key) : typeof getTask === 'function' ? getTask(key) : null;
+        if (!task) return json(res, 404, { error: '同步任务不存在或已删除' });
+        emit('info', `对端通知（任务「${task.name}」）：${String(event || 'unknown')}`);
+        try { if (typeof onNotify === 'function') onNotify(key, String(event || 'unknown')); } catch { /* 通知落地失败不影响应答 */ }
+        return json(res, 200, { ok: true });
+      }
+
+      if (req.method === 'POST' && url.pathname === '/api/sync/invite') {
+        const body = await readJson(req);
+        const { signed, requesterId, invite } = body;
+        if (!authorized(signed, requesterId)) return json(res, 403, { error: '设备未获信任' });
+        const taskName = String(invite?.taskName || '').trim().slice(0, 120);
+        const pairKey = String(invite?.pairKey || '').trim().toUpperCase();
+        if (!taskName || !/^[A-HJ-NP-Z2-9]{6}$/.test(pairKey)) return json(res, 400, { error: '同步邀请参数无效' });
+        const peerAddress = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+        const invitation = {
+          invitationId: `sync_invite_${String(requesterId)}_${pairKey}`,
+          taskName,
+          pairKey,
+          peerDeviceId: String(requesterId),
+          peerDeviceName: String(invite?.peerDeviceName || '').slice(0, 80),
+          peerAddress,
+          peerPort: Number(invite?.peerPort) || port,
+          receivedAt: new Date().toISOString(),
+        };
+        emit('info', `收到同步任务邀请「${taskName}」`);
+        try { if (typeof onInvite === 'function') onInvite(invitation); } catch { /* UI 推送失败不影响应答 */ }
+        return json(res, 200, { ok: true, invitationId: invitation.invitationId });
+      }
+
+      if (req.method === 'POST' && url.pathname === '/api/sync/list') {
+        const body = await readJson(req);
+        const { signed, requesterId } = body;
+        if (!authorized(signed, requesterId)) return json(res, 403, { error: '设备未获信任' });
+        const task = resolveTask(res, getTask, body);
+        if (!task) return;
+        const root = task.localRoot;
+        fs.mkdirSync(root, { recursive: true });
         const files = [...scanTree(root)].map(([rel, meta]) => ({ path: rel, size: meta.size, mtimeMs: meta.mtimeMs }));
         return json(res, 200, { ok: true, files });
       }
 
       if (req.method === 'POST' && url.pathname === '/api/sync/begin') {
-        const { signed, requesterId, path: rel, size, sha256, chunkSize } = await readJson(req);
+        const body = await readJson(req);
+        const { signed, requesterId, path: rel, size, mtimeMs, sha256, chunkSize } = body;
         if (!authorized(signed, requesterId)) return json(res, 403, { error: '设备未获信任' });
+        const task = resolveTask(res, getTask, body);
+        if (!task) return;
+        const root = task.localRoot;
         const target = safeTarget(root, rel);
         if (!target) return json(res, 400, { error: '目标路径无效' });
         if (!/^[a-f0-9]{64}$/i.test(String(sha256 || ''))) return json(res, 400, { error: '校验和无效' });
         const plan = chunkPlan(Number(size), Number(chunkSize));
         const transferId = `sync_${crypto.randomBytes(12).toString('hex')}`;
+        const incomingDir = path.join(root, INCOMING_DIR);
         fs.mkdirSync(incomingDir, { recursive: true });
         const tmp = path.join(incomingDir, `${transferId}.part`);
         const fd = fs.openSync(tmp, 'w');
         fs.ftruncateSync(fd, plan.size);
         fs.closeSync(fd);
-        sessions.set(transferId, { transferId, target, tmp, sha256: String(sha256).toLowerCase(), ...plan, received: new Set() });
+        sessions.set(transferId, { transferId, target, tmp, relPath: normalizeRelPath(rel), mtimeMs: Number.isFinite(Number(mtimeMs)) ? Number(mtimeMs) : null, sha256: String(sha256).toLowerCase(), ...plan, received: new Set() });
         return json(res, 200, { ok: true, transferId, chunkCount: plan.chunkCount, missing: [...Array(plan.chunkCount).keys()] });
       }
 
@@ -137,15 +197,24 @@ function startSyncServer({ port = 7892, host = '0.0.0.0', root, deviceId, lookup
           return json(res, 400, { error: '校验和不匹配，已丢弃' });
         }
         fs.mkdirSync(path.dirname(session.target), { recursive: true });
+        if (fs.existsSync(session.target)) fs.rmSync(session.target, { force: true });
         fs.renameSync(session.tmp, session.target);
+        if (session.mtimeMs !== null) {
+          const modified = new Date(session.mtimeMs);
+          fs.utimesSync(session.target, modified, modified);
+        }
         sessions.delete(session.transferId);
-        emit('info', `已同步 ${path.relative(root, session.target)}`);
-        return json(res, 200, { ok: true, path: path.relative(root, session.target).split(path.sep).join('/') });
+        emit('info', `已同步 ${session.relPath}`);
+        return json(res, 200, { ok: true, path: session.relPath });
       }
 
       if (req.method === 'POST' && url.pathname === '/api/sync/trash') {
-        const { signed, requesterId, paths } = await readJson(req);
+        const body = await readJson(req);
+        const { signed, requesterId, paths } = body;
         if (!authorized(signed, requesterId)) return json(res, 403, { error: '设备未获信任' });
+        const task = resolveTask(res, getTask, body);
+        if (!task) return;
+        const root = task.localRoot;
         if (!Array.isArray(paths)) return json(res, 400, { error: '参数无效' });
         const moved = [];
         const skipped = [];
@@ -163,12 +232,17 @@ function startSyncServer({ port = 7892, host = '0.0.0.0', root, deviceId, lookup
       }
 
       if (req.method === 'POST' && url.pathname === '/api/sync/purge') {
-        const { signed, requesterId, retentionDays } = await readJson(req);
+        const body = await readJson(req);
+        const { signed, requesterId, retentionDays } = body;
         if (!authorized(signed, requesterId)) return json(res, 403, { error: '设备未获信任' });
+        const task = resolveTask(res, getTask, body);
+        if (!task) return;
+        const root = task.localRoot;
+        const trashDir = path.join(root, TRASH_DIR);
         let entries = [];
         try { entries = fs.readdirSync(trashDir); } catch { entries = []; }
         const purged = [];
-        for (const stamp of purgeStamps(entries, Number(retentionDays))) {
+        for (const stamp of purgeStamps(entries, Number(retentionDays ?? task.trashRetentionDays))) {
           try { fs.rmSync(path.join(trashDir, stamp), { recursive: true, force: true }); purged.push(stamp); } catch { /* 个别失败不阻断 */ }
         }
         if (purged.length) emit('info', `已清理 ${purged.length} 个过期回收批次`);
@@ -192,7 +266,6 @@ function startSyncServer({ port = 7892, host = '0.0.0.0', root, deviceId, lookup
           server,
           port: server.address().port,
           host,
-          root,
           dropSession: (transferId) => sessions.delete(String(transferId || '')),
           close: () => new Promise((done) => server.close(done)),
         });

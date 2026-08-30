@@ -27,6 +27,7 @@ export default function ChatPage({ isWin }) {
   const [storageOpen, setStorageOpen] = useState(false);
   const [storage, setStorage] = useState(null);
   const [storageBusy, setStorageBusy] = useState(false);
+  const [previewImage, setPreviewImage] = useState(null);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [unread, setUnread] = useState(0);
@@ -94,8 +95,25 @@ export default function ChatPage({ isWin }) {
   }, []);
 
   useEffect(() => {
+    if (!previewImage) return undefined;
+    const close = (event) => { if (event.key === 'Escape') setPreviewImage(null); };
+    document.addEventListener('keydown', close);
+    return () => document.removeEventListener('keydown', close);
+  }, [previewImage]);
+
+  useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages]);
+
+  // 本机设备身份（实名进入群聊，匿名会被服务端拒绝）
+  const [myId, setMyId] = useState('');
+  const [myName, setMyName] = useState('');
+  useEffect(() => {
+    window.api.device?.info?.().then((info) => {
+      if (info?.deviceId) setMyId(info.deviceId);
+      setMyName(info?.deviceName || '');
+    }).catch(() => {});
+  }, []);
 
   // 简易 toast
   const [toast, setToast] = useState(null);
@@ -116,7 +134,8 @@ export default function ChatPage({ isWin }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           clientId: createClientId(),
-          nick: nick || '匿名',
+          requesterId: myId,
+          nick: nick || myName || '我的设备',
           text: t,
           ...(replyTo ? { replyTo: { id: replyTo.id } } : {}),
         }),
@@ -147,7 +166,7 @@ export default function ChatPage({ isWin }) {
       if (archive && file.size > 200 * 1024 * 1024) return showToast('压缩文件不能超过 200MB', false);
       try {
         const suffix = options.folder ? '&folder=1' : '';
-        const up = await fetch(`${serverUrl}/api/upload?name=${encodeURIComponent(file.name || '')}${suffix}`, {
+        const up = await fetch(`${serverUrl}/api/upload?name=${encodeURIComponent(file.name || '')}&requesterId=${encodeURIComponent(myId)}${suffix}`, {
           method: 'POST',
           headers: { 'Content-Type': file.type || 'application/octet-stream' },
           body: file,
@@ -156,7 +175,8 @@ export default function ChatPage({ isWin }) {
         if (!ud.ok || !ud.url) throw new Error(ud.error || '上传失败');
         const payload = {
           clientId: createClientId(),
-          nick: nick || '匿名',
+          requesterId: myId,
+          nick: nick || myName || '我的设备',
           text: text.trim(),
           ...(replyTo ? { replyTo: { id: replyTo.id } } : {}),
         };
@@ -353,14 +373,16 @@ export default function ChatPage({ isWin }) {
       {dragging && <div className="chat-drop-overlay">松开鼠标发送文件或文件夹</div>}
       <div className="chat-head">
         <div className="chat-title">
-          <span className={`chat-dot ${status === 'connected' ? 'on' : ''}`} />
-          <h3>群聊</h3>
-          <span className="chat-status">
-            {status === 'connected' ? `已连接 · ${online} 人在线` : status === 'connecting' ? '连接中…' : '未连接'}
-          </span>
+          <div className="chat-title-copy">
+            <h3>局域网群聊</h3>
+            <div className="chat-status">
+              <span className={`chat-dot ${status === 'connected' ? 'on' : ''}`} />
+              {status === 'connected' ? `连接正常 · ${online} 人在线` : status === 'connecting' ? '正在连接…' : '连接已断开'}
+            </div>
+          </div>
         </div>
         <div className="chat-setup">
-          {isWin && <button className="btn small" onClick={openStorage}>记录管理</button>}
+          {isWin && <button className="btn small ghost" onClick={openStorage}>记录管理</button>}
           {!isWin && (
             <div className="row chat-server-row">
               <input
@@ -375,11 +397,12 @@ export default function ChatPage({ isWin }) {
           )}
           <input
             className="text-input chat-search-input"
-            placeholder="搜索消息"
+            placeholder="搜索消息…"
+            aria-label="搜索消息"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-          <button className="btn small" onClick={async () => { const next = !notifyEnabled; setNotifyEnabled(next); localStorage.setItem('inner-net-chat-notify', next ? 'on' : 'off'); if (next && 'Notification' in globalThis && globalThis.Notification.permission === 'default') await globalThis.Notification.requestPermission(); }}>{notifyEnabled ? '通知开' : '通知关'}{unread ? ` · ${unread}` : ''}</button>
+          <button className={`btn small chat-notify-btn ${notifyEnabled ? 'is-on' : ''}`} onClick={async () => { const next = !notifyEnabled; setNotifyEnabled(next); localStorage.setItem('inner-net-chat-notify', next ? 'on' : 'off'); if (next && 'Notification' in globalThis && globalThis.Notification.permission === 'default') await globalThis.Notification.requestPermission(); }}>{notifyEnabled ? '通知已开' : '通知已关'}{unread ? ` · ${unread}` : ''}</button>
           <input
             className="text-input chat-nick-input"
             placeholder="昵称"
@@ -395,83 +418,88 @@ export default function ChatPage({ isWin }) {
 
       {isWin && lanUrl && (
         <div className="lan-banner">
-          手机/其他设备浏览器打开 <span className="mono">{lanUrl}</span> 即可加入群聊
+          <span className="lan-banner-icon">⌁</span>
+          <div>
+            <strong>邀请其他设备加入</strong>
+            <span>在手机或其他设备浏览器打开 <code className="mono">{lanUrl}</code></span>
+          </div>
+          <button className="btn small ghost" onClick={async () => { await navigator.clipboard?.writeText(lanUrl); showToast('群聊地址已复制'); }}>复制地址</button>
         </div>
       )}
 
       <div className="chat-list" ref={listRef}>
         {visibleMessages.length === 0 ? (
           <div className="chat-empty">
-            {query ? '没有匹配的消息' : status === 'connected' ? '群聊已就绪，发第一条消息吧' : '等待连接…'}
+            <span className="chat-empty-icon">{query ? '⌕' : '◇'}</span>
+            <strong>{query ? '没有匹配的消息' : status === 'connected' ? '群聊已经准备好了' : '正在等待连接'}</strong>
+            <span>{query ? '换个关键词再试试' : status === 'connected' ? '发一条消息，开始和局域网设备交流' : '连接成功后即可收发消息'}</span>
           </div>
         ) : (
           visibleMessages.map((m) => (
             <div className={`chat-msg ${m.nick === nick ? 'mine' : ''}`} key={`${m.id}-${m.ts}`}>
-              <div className="chat-msg-actions">
-                <button className="chat-copy" onClick={() => setReplyTo(m)}>回复</button>
-                {m.text && (
-                  <button className="chat-copy" onClick={() => copyMsg(m)}>
-                    {copiedId === m.id ? '已复制 ✓' : '复制'}
-                  </button>
-                )}
-                {m.text && (
-                  <button className="chat-copy" onClick={() => saveText(m.text)} title="保存为 txt 下载">
-                    保存
-                  </button>
-                )}
-              </div>
-              <div className="chat-msg-head">
-                <span className="chat-msg-nick">{m.nick}</span>
-                <span>{new Date(m.ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
-              </div>
-              <div className="chat-msg-bubble">
-                {m.reply && (
-                  <div className="chat-reply-quote">
-                    <strong>{m.reply.nick}</strong>
-                    <span>{m.reply.text}</span>
-                  </div>
-                )}
-                {m.image && (
-                  <img
-                    className="chat-img"
-                    src={`${serverUrl}${m.image}`}
-                    alt="图片"
-                    loading="lazy"
-                    title="点击复制图片"
-                    onClick={() => copyImage(`${serverUrl}${m.image}`)}
-                    onError={(e) => { e.target.style.display = 'none'; }}
-                  />
-                )}
-                {m.file && (
-                  <a
-                    className="chat-file"
-                    href={`${serverUrl}${m.file.url}`}
-                    download={m.file.name}
-                    title="点击下载"
-                  >
-                    <span className="chat-file-icon">{m.file.kind === 'folder' ? '🗂️' : m.file.kind === 'archive' ? '🗜️' : '📄'}</span>
-                    <span className="chat-file-name">{m.file.name}</span>
-                    <span className="chat-file-dl">下载</span>
-                  </a>
-                )}
-                {m.text && <span>{m.text.split(/(@[\w\-\u4e00-\u9fff]+)/g).map((part, i) => part.startsWith('@') ? <mark className="chat-mention" key={i}>{part}</mark> : <React.Fragment key={i}>{part}</React.Fragment>)}</span>}
+              <span className="chat-avatar" aria-hidden="true">{String(m.nick || '?').trim().slice(0, 1).toLocaleUpperCase()}</span>
+              <div className="chat-msg-content">
+                <div className="chat-msg-actions">
+                  <button className="chat-copy" onClick={() => setReplyTo(m)}>回复</button>
+                  {m.image && (
+                    <button className="chat-copy" onClick={() => setPreviewImage({ url: `${serverUrl}${m.image}`, nick: m.nick, ts: m.ts })}>预览</button>
+                  )}
+                  {m.text && (
+                    <button className="chat-copy" onClick={() => copyMsg(m)}>
+                      {copiedId === m.id ? '已复制 ✓' : '复制'}
+                    </button>
+                  )}
+                  {m.text && (
+                    <button className="chat-copy" onClick={() => saveText(m.text)} title="保存为 txt 下载">保存</button>
+                  )}
+                </div>
+                <div className="chat-msg-head">
+                  <span className="chat-msg-nick">{m.nick}</span>
+                  <span>{new Date(m.ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
+                </div>
+                <div className="chat-msg-bubble">
+                  {m.reply && (
+                    <div className="chat-reply-quote">
+                      <strong>{m.reply.nick}</strong>
+                      <span>{m.reply.text}</span>
+                    </div>
+                  )}
+                  {m.image && (
+                    <img
+                      className="chat-img"
+                      src={`${serverUrl}${m.image}`}
+                      alt="图片"
+                      loading="lazy"
+                      title="点击预览图片"
+                      onClick={() => setPreviewImage({ url: `${serverUrl}${m.image}`, nick: m.nick, ts: m.ts })}
+                      onError={(e) => { e.target.style.display = 'none'; }}
+                    />
+                  )}
+                  {m.file && (
+                    <a className="chat-file" href={`${serverUrl}${m.file.url}`} download={m.file.name} title="点击下载">
+                      <span className="chat-file-icon">{m.file.kind === 'folder' ? '🗂️' : m.file.kind === 'archive' ? '🗜️' : '📄'}</span>
+                      <span className="chat-file-name">{m.file.name}</span>
+                      <span className="chat-file-dl">下载</span>
+                    </a>
+                  )}
+                  {m.text && <span>{m.text.split(/(@[\w\-\u4e00-\u9fff]+)/g).map((part, i) => part.startsWith('@') ? <mark className="chat-mention" key={i}>{part}</mark> : <React.Fragment key={i}>{part}</React.Fragment>)}</span>}
+                </div>
               </div>
             </div>
           ))
         )}
       </div>
 
-      {replyTo && (
-        <div className="chat-replying">
-          <span>回复 <strong>{replyTo.nick}</strong>：{replyTo.text || (replyTo.image ? '[图片]' : `[文件] ${replyTo.file?.name || ''}`)}</span>
-          <button onClick={() => setReplyTo(null)} aria-label="取消回复">×</button>
-        </div>
-      )}
-
-      <div className="chat-input-bar" onPaste={onPaste}>
+      <div className="chat-composer" onPaste={onPaste}>
+        {replyTo && (
+          <div className="chat-replying">
+            <span>回复 <strong>{replyTo.nick}</strong>：{replyTo.text || (replyTo.image ? '[图片]' : `[文件] ${replyTo.file?.name || ''}`)}</span>
+            <button onClick={() => setReplyTo(null)} aria-label="取消回复">×</button>
+          </div>
+        )}
         <textarea
           className="chat-input"
-          placeholder="输入消息，Enter 发送，Shift+Enter 换行（可直接粘贴图片/文字）"
+          placeholder="输入消息…"
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
@@ -481,44 +509,28 @@ export default function ChatPage({ isWin }) {
             }
           }}
         />
-        <input
-          ref={fileRef}
-          type="file"
-          multiple
-          accept="image/*,.txt,.text,.md,.markdown,.rst,.adoc,.csv,.tsv,.log,.json,.json5,.jsonl,.yaml,.yml,.toml,.ini,.conf,.cfg,.properties,.env,.xml,.xsl,.xsd,.sql,.js,.mjs,.cjs,.jsx,.ts,.tsx,.vue,.svelte,.astro,.py,.rb,.php,.java,.go,.rs,.c,.h,.cc,.cpp,.hpp,.cs,.swift,.kt,.kts,.sh,.bash,.zsh,.fish,.bat,.cmd,.ps1,.psm1,.html,.htm,.css,.scss,.less,.graphql,.gql,.tex,.rtf,.svg,.zip,.7z,.rar,.tar,.gz,.tgz,.bz2,.xz"
-          style={{ display: 'none' }}
-          onChange={(e) => {
-            const files = e.target.files;
-            e.target.value = '';
-            if (files?.length) sendFiles(files);
-          }}
-        />
-        <input
-          ref={folderRef}
-          type="file"
-          webkitdirectory=""
-          multiple
-          style={{ display: 'none' }}
-          onChange={(e) => {
-            const files = e.target.files;
-            e.target.value = '';
-            if (files?.length) sendFolder(files);
-          }}
-        />
-        <div className="chat-attach-wrap" onMouseDown={(e) => e.stopPropagation()}>
-          <button className="btn chat-img-btn" title="发送文件或文件夹" onClick={() => setAttachMenuOpen((open) => !open)}>
-          📎
-          </button>
-          {attachMenuOpen && (
-            <div className="chat-attach-menu">
-              <button onClick={() => { setAttachMenuOpen(false); fileRef.current?.click(); }}>选择文件/图片</button>
-              <button onClick={() => { setAttachMenuOpen(false); folderRef.current?.click(); }}>选择文件夹</button>
+        <div className="chat-composer-footer">
+          <span className="chat-input-hint">Enter 发送 · Shift+Enter 换行 · 支持粘贴或拖入文件</span>
+          <div className="chat-composer-actions">
+            <input ref={fileRef} type="file" multiple
+              accept="image/*,.txt,.text,.md,.markdown,.rst,.adoc,.csv,.tsv,.log,.json,.json5,.jsonl,.yaml,.yml,.toml,.ini,.conf,.cfg,.properties,.env,.xml,.xsl,.xsd,.sql,.js,.mjs,.cjs,.jsx,.ts,.tsx,.vue,.svelte,.astro,.py,.rb,.php,.java,.go,.rs,.c,.h,.cc,.cpp,.hpp,.cs,.swift,.kt,.kts,.sh,.bash,.zsh,.fish,.bat,.cmd,.ps1,.psm1,.html,.htm,.css,.scss,.less,.graphql,.gql,.tex,.rtf,.svg,.zip,.7z,.rar,.tar,.gz,.tgz,.bz2,.xz"
+              style={{ display: 'none' }} onChange={(e) => { const files = e.target.files; e.target.value = ''; if (files?.length) sendFiles(files); }} />
+            <input ref={folderRef} type="file" webkitdirectory="" multiple style={{ display: 'none' }}
+              onChange={(e) => { const files = e.target.files; e.target.value = ''; if (files?.length) sendFolder(files); }} />
+            <div className="chat-attach-wrap" onMouseDown={(e) => e.stopPropagation()}>
+              <button className="btn chat-img-btn" title="发送文件或文件夹" aria-label="添加附件" onClick={() => setAttachMenuOpen((open) => !open)}>📎</button>
+              {attachMenuOpen && (
+                <div className="chat-attach-menu">
+                  <button onClick={() => { setAttachMenuOpen(false); fileRef.current?.click(); }}>选择文件或图片</button>
+                  <button onClick={() => { setAttachMenuOpen(false); folderRef.current?.click(); }}>选择文件夹</button>
+                </div>
+              )}
             </div>
-          )}
+            <button className="btn primary chat-send-btn" onClick={send} disabled={!serverUrl || status !== 'connected' || sending}>
+              {sending ? '发送中…' : '发送'}
+            </button>
+          </div>
         </div>
-        <button className="btn primary" onClick={send} disabled={!serverUrl || status !== 'connected' || sending}>
-          {sending ? '发送中…' : '发送'}
-        </button>
       </div>
 
       {storageOpen && (
@@ -555,6 +567,28 @@ export default function ChatPage({ isWin }) {
                 <button className="btn" onClick={async () => { const raw = window.prompt('输入要删除的消息 ID（逗号分隔）'); if (!raw) return; const r = await window.api.chat.deleteMessages(raw.split(',').map((x) => Number(x.trim())).filter(Number.isInteger)); showToast(`已删除 ${r.count} 条消息`); }}>按 ID 删除消息</button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {previewImage && (
+        <div className="chat-preview-mask" role="presentation" onClick={() => setPreviewImage(null)}>
+          <div className="chat-preview" role="dialog" aria-modal="true" aria-label="图片预览" onClick={(e) => e.stopPropagation()}>
+            <div className="chat-preview-head">
+              <div>
+                <strong>{previewImage.nick || '群聊图片'}</strong>
+                <span>{previewImage.ts ? new Date(previewImage.ts).toLocaleString('zh-CN') : ''}</span>
+              </div>
+              <div className="chat-preview-actions">
+                <button className="btn small" onClick={() => copyImage(previewImage.url)}>复制图片</button>
+                <a className="btn small" href={previewImage.url} download>下载</a>
+                <button className="btn small primary" onClick={() => setPreviewImage(null)}>关闭</button>
+              </div>
+            </div>
+            <div className="chat-preview-stage">
+              <img src={previewImage.url} alt="群聊图片预览" />
+            </div>
+            <span className="chat-preview-hint">按 Esc 或点击空白区域关闭</span>
           </div>
         </div>
       )}

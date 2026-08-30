@@ -445,12 +445,33 @@ export default function MountManager({ sys }) {
           <MountForm
             root={root}
             initial={editing}
+            hostHasPassword={Boolean(hostPasswords[editing.host]?.hasPassword)}
             onSubmit={(m) => {
               setEditing(null);
               saveAndReload(mounts.map((x) => (x.id === m.id ? m : x)));
               show(`已保存 ${m.shareName}`);
             }}
             onCancel={() => setEditing(null)}
+          />
+        </Modal>
+      )}
+
+      {editingHost && (
+        <Modal title={`${editingHost.hasPassword ? '更新' : '设置'}主机统一密码`} onClose={() => setEditingHost(null)}>
+          <HostPasswordForm
+            host={editingHost.host}
+            hasPassword={editingHost.hasPassword}
+            onSubmit={async (password) => {
+              const result = await window.api.host.set({ host: editingHost.host, password });
+              setEditingHost(null);
+              show(
+                result?.propagated
+                  ? `已为 ${editingHost.host} 设置统一密码，覆盖 ${result.propagated} 个共享`
+                  : `已为 ${editingHost.host} 设置统一密码`
+              );
+              refresh();
+            }}
+            onCancel={() => setEditingHost(null)}
           />
         </Modal>
       )}

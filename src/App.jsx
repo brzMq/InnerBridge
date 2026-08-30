@@ -6,6 +6,7 @@ import LogPage from './components/LogPage.jsx';
 import DeviceCenter from './components/DeviceCenter.jsx';
 import ServiceSettings from './components/ServiceSettings.jsx';
 import TransferPage from './components/TransferPage.jsx';
+import SyncPage from './components/SyncPage.jsx';
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -126,6 +127,7 @@ export default function App() {
           群聊
         </button>
         <button className={tab === 'transfer' ? 'on' : ''} onClick={() => setTab('transfer')}>P2P传输</button>
+        <button className={tab === 'sync' ? 'on' : ''} onClick={() => setTab('sync')}>文件夹同步</button>
         <button className={tab === 'log' ? 'on' : ''} onClick={() => setTab('log')}>
           运行日志
         </button>
@@ -145,6 +147,8 @@ export default function App() {
               ? <ServiceSettings />
               : tab === 'transfer'
                 ? <TransferPage />
+                : tab === 'sync'
+                ? <SyncPage />
               : <LogPage />}
       </main>
     </div>

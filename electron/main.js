@@ -14,6 +14,8 @@ const { storageStats, clearChatStorage } = require('./chat-storage');
 const { loadOrCreateIdentity } = require('../core/device-identity');
 const { createChallenge, signChallenge, verifyChallenge } = require('../core/light-auth');
 const { createRevocation, signRevocation } = require('../core/revocation');
+const { startSyncServer } = require('./sync-server');
+const { createSyncService } = require('./sync-service');
 const { buildLocalDevice } = require('../core/capability-resolver');
 const { startDiscovery } = require('./discovery-service');
 const { createCredentialStore } = require('../core/credential-store');
@@ -606,6 +608,17 @@ function registerIpc() {
   trustedCredentialStore = credentialStore;
   // 主机统一密码库：与配对凭据同一加密机制，独立文件便于备份/迁移
   hostCredentialStore = createCredentialStore(path.join(DATA_DIR, 'host-credentials.json'), { safeStorage });
+  // 文件夹同步：主从角色的编排层，内部按角色决定是否起监听或 HTTP 服务
+  syncService = createSyncService({
+    dataDir: DATA_DIR,
+    deviceId: loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), {}).deviceId,
+    privateKeyPath: path.join(DATA_DIR, 'device.json.private.pem'),
+    port: normalizeServicePorts(loadSettings().servicePorts || {}).sync,
+    startServer: (opts) => startSyncServer({ ...opts, createChallenge }),
+    lookupTrustedPublicKey: (id) => trustedDevicePublicKey(id),
+    logEvent,
+    onState: (state) => mainWindow?.webContents.send('sync:state', state),
+  });
   ipcMain.handle('transfer:info', () => ({ port: transferServer?.port || null, localOnly: false, host: transferServer?.host || '0.0.0.0', root: TRANSFER_DIR }));
   ipcMain.handle('transfer:requestChallenge', async (_e, input = {}) => { const host = String(input.host || ''); const port = Number(input.port || 7891); if (!host || !input.sessionId || !input.transferId || !input.senderId) return { ok: false, reasonCode: 'CHALLENGE_PARAMS_INVALID' }; try { const response = await globalThis.fetch(`http://${host}:${port}/api/pair/transfer-challenge`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: input.sessionId, senderId: input.senderId, transferId: input.transferId }) }); const body = await response.json(); if (!response.ok) { demoteUntrusted(String(input.senderId || ''), '文件传输'); return { ok: false, reasonCode: 'CHALLENGE_REJECTED' }; } return body; } catch { return { ok: false, reasonCode: 'CHALLENGE_UNREACHABLE' }; } });
   ipcMain.handle('transfer:selectFile', async () => { const picked = await dialog.showOpenDialog({ properties: ['openFile', 'openDirectory'], title: '选择要传输的文件或文件夹' }); if (picked.canceled || !picked.filePaths[0]) return null; const file = picked.filePaths[0]; const stat = fs.statSync(file); if (stat.isDirectory()) return { path: file, name: path.basename(file), kind: 'folder', size: 0, sha256: null }; const sha256 = await hashFile(file); return { path: file, name: path.basename(file), kind: 'file', size: stat.size, sha256 }; });
@@ -615,7 +628,7 @@ function registerIpc() {
     const ports = normalizeServicePorts({ transfer: transferServer?.port || DEFAULT_PORTS.transfer });
     const checkTcp = (port) => new Promise((resolve) => { const socket = net.createConnection({ host: '127.0.0.1', port }); socket.once('connect', () => { socket.destroy(); resolve(true); }); socket.once('error', () => resolve(false)); socket.setTimeout(300, () => { socket.destroy(); resolve(false); }); });
     const checkUdp = (port) => new Promise((resolve) => { const socket = dgram.createSocket('udp4'); socket.once('listening', () => { socket.close(() => resolve(false)); }); socket.once('error', (error) => { socket.close(() => resolve(error.code === 'EADDRINUSE')); }); socket.bind(port, '127.0.0.1'); });
-    const result = []; for (const [name, port] of Object.entries(ports)) { const check = RANGES[name] === 'udp' ? checkUdp : checkTcp; const occupied = await check(port); const expected = name === 'chat' ? Boolean(chatInfo?.port === port) : name === 'pairing' ? Boolean(pairingServer?.port === port) : name === 'transfer' ? Boolean(transferServer?.port === port) : false; const item = describePort(name, port, occupied, expected); if (occupied && !expected) { for (let candidate = port + 1; candidate < Math.min(port + 100, 65536); candidate += 1) { if (!(await check(candidate))) { item.suggestedPort = candidate; break; } } } result.push(item); } return { ports, services: result, checkedAt: new Date().toISOString() };
+    const result = []; for (const [name, port] of Object.entries(ports)) { const check = RANGES[name] === 'udp' ? checkUdp : checkTcp; const occupied = await check(port); const expected = name === 'chat' ? Boolean(chatInfo?.port === port) : name === 'pairing' ? Boolean(pairingServer?.port === port) : name === 'transfer' ? Boolean(transferServer?.port === port) : name === 'sync' ? Boolean(syncService?.port() === port) : false; const item = describePort(name, port, occupied, expected); if (occupied && !expected) { for (let candidate = port + 1; candidate < Math.min(port + 100, 65536); candidate += 1) { if (!(await check(candidate))) { item.suggestedPort = candidate; break; } } } result.push(item); } return { ports, services: result, checkedAt: new Date().toISOString() };
   });
   ipcMain.handle('pairing:pending', () => pairingServer?.pending?.() || []);
   ipcMain.handle('pairing:confirmIncoming', (_e, { sessionId, code } = {}) => { const result = pairingServer?.confirm?.(sessionId, code) || { ok: false, reasonCode: 'PAIRING_SERVICE_UNAVAILABLE' }; if (result.ok) credentialStore.set(result.remoteDeviceId, JSON.stringify({ authorization: result.authorization, fingerprint: result.remoteFingerprint, publicKey: result.remotePublicKey || '' })); return result; });
@@ -1081,6 +1094,25 @@ function registerIpc() {
     return { ok: true };
   });
 
+  // ---- 文件夹同步（主从、实时） ----
+  ipcMain.handle('sync:state', () => syncService?.getState() || null);
+  ipcMain.handle('sync:setConfig', async (_e, patch = {}) => {
+    const next = syncService.updateConfig(patch);
+    await syncService.apply();
+    return next;
+  });
+  ipcMain.handle('sync:start', () => syncService.apply({ start: true }));
+  ipcMain.handle('sync:stop', () => syncService.apply({ start: false }));
+  ipcMain.handle('sync:runNow', () => syncService.runCycle({ fullScan: true, reason: 'manual' }));
+  ipcMain.handle('sync:resetIndex', () => syncService.resetIndex());
+  ipcMain.handle('sync:trash', () => syncService.listTrash());
+  ipcMain.handle('sync:restore', (_e, { stamp, path: rel } = {}) => syncService.restoreFromTrash(stamp, rel));
+  ipcMain.handle('sync:purgeTrash', (_e, opts = {}) => syncService.purgeTrash(opts));
+  ipcMain.handle('sync:pickDir', async () => {
+    const picked = await dialog.showOpenDialog({ properties: ['openDirectory'], title: '选择同步目录' });
+    return picked.canceled || !picked.filePaths[0] ? null : picked.filePaths[0];
+  });
+
   // ---- 群聊 ----
   ipcMain.handle('chat:info', () => ({
     port: chatInfo?.port || 0,
@@ -1140,6 +1172,7 @@ let transferServer = null;
 let trustedCredentialStore = null;
 let hostCredentialStore = null;
 let discoveryService = null;
+let syncService = null;
 /**
  * 本机解除对某设备的信任，并立即把变更推给界面。
  * reason=remote 表示是对端主动送达的撤销，界面据此区分「从未配对」和「被对方解除」。
@@ -1319,6 +1352,8 @@ app.whenReady().then(() => {
   startTransfer().catch((err) => logEvent('warn', 'transfer', '原生传输服务启动失败: ' + err.message));
   createWindow();
   logEvent('info', 'app', '主窗口已创建');
+  // 按上次保存的角色恢复同步；未配置时 config.role 为 off，apply 会直接返回
+  syncService?.apply().catch((err) => logEvent('warn', 'sync', `同步服务启动失败: ${err.message}`));
 
   // 启动自愈：修复历史遗留的共享目录 ACL 损坏（一次性，延迟执行不阻塞 UI）
   setTimeout(() => {
@@ -1336,4 +1371,9 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (!IS_MAC) app.quit();
+});
+
+app.on('before-quit', () => {
+  // 停掉监听与同步服务，避免残留句柄阻止进程退出
+  syncService?.dispose().catch(() => {});
 });

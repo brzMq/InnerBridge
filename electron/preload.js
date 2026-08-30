@@ -45,6 +45,23 @@ contextBridge.exposeInMainWorld('api', {
     set: (data) => ipcRenderer.invoke('host:set', data),
     remove: (data) => ipcRenderer.invoke('host:remove', data),
   },
+  sync: {
+    state: () => ipcRenderer.invoke('sync:state'),
+    setConfig: (patch) => ipcRenderer.invoke('sync:setConfig', patch),
+    start: () => ipcRenderer.invoke('sync:start'),
+    stop: () => ipcRenderer.invoke('sync:stop'),
+    runNow: () => ipcRenderer.invoke('sync:runNow'),
+    resetIndex: () => ipcRenderer.invoke('sync:resetIndex'),
+    trash: () => ipcRenderer.invoke('sync:trash'),
+    restore: (data) => ipcRenderer.invoke('sync:restore', data),
+    purgeTrash: (opts) => ipcRenderer.invoke('sync:purgeTrash', opts),
+    pickDir: () => ipcRenderer.invoke('sync:pickDir'),
+    onState: (callback) => {
+      const listener = (_event, state) => callback(state);
+      ipcRenderer.on('sync:state', listener);
+      return () => ipcRenderer.removeListener('sync:state', listener);
+    },
+  },
 
   chat: {
     info: () => ipcRenderer.invoke('chat:info'),

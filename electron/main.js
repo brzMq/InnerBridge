@@ -15,7 +15,7 @@ const { loadOrCreateIdentity } = require('../core/device-identity');
 const { createChallenge, signChallenge, verifyChallenge } = require('../core/light-auth');
 const { createRevocation, signRevocation } = require('../core/revocation');
 const { startSyncServer } = require('./sync-server');
-const { parseArpTable, mergeLanDevices } = require('../core/lan-devices');
+const { createAccessLog } = require('../core/access-log');
 const wol = require('../core/wol');
 const { wake } = require('./wol-service');
 const { createSyncService } = require('./sync-service');
@@ -219,15 +219,6 @@ function isAdmin() {
 }
 
 // ---------- Windows 共享命令 ----------
-
-/** 建本地账号（已存在则跳过） */
-function verifyUserCredentials(account, password) { const name = String(account || '').trim(); const pwd = String(password || ''); if (!name || !pwd) throw new Error('请输入已存在的本地 Windows 用户名和密码'); const list = runCmd('net', ['user']); if (!list.toLowerCase().includes(name.toLowerCase())) throw new Error(`Windows 本地用户不存在：${name}，请先在系统中创建用户`); return name; }
-function ensureUser(account, password) {
-  const list = runCmd('net', ['user']);
-  if (new RegExp(`^${account}\\b`, 'im').test(list)) return false;
-  runCmd('net', ['user', account, password, '/add']);
-  return true;
-}
 
 /**
  * 目录授权：仅为共享账号添加 NTFS 显式授权，保留/恢复继承。
@@ -455,6 +446,8 @@ function removeUser(account) {
   } catch { /* 忽略删除失败 */ }
 }
 
+function verifyUserCredentials(account, password) { const name = String(account || '').trim(); if (!name || !String(password || '')) throw new Error('请输入已存在的本地 Windows 用户名和密码'); const list = runCmd('net', ['user']); if (!list.toLowerCase().includes(name.toLowerCase())) throw new Error(`Windows 本地用户不存在：${name}，请先在系统中创建用户`); return name; }
+
 // ---------- macOS 挂载命令 ----------
 
 /**
@@ -611,6 +604,8 @@ function registerIpc() {
   trustedCredentialStore = credentialStore;
   // 主机统一密码库：与配对凭据同一加密机制，独立文件便于备份/迁移
   hostCredentialStore = createCredentialStore(path.join(DATA_DIR, 'host-credentials.json'), { safeStorage });
+  // 访问过本机的设备记录（群聊/共享清单/同步入口）
+  accessLog = createAccessLog(path.join(DATA_DIR, 'access-log.json'));
   // 文件夹同步：主从角色的编排层，内部按角色决定是否起监听或 HTTP 服务
   syncService = createSyncService({
     dataDir: DATA_DIR,
@@ -621,10 +616,125 @@ function registerIpc() {
     lookupTrustedPublicKey: (id) => trustedDevicePublicKey(id),
     logEvent,
     onState: (state) => mainWindow?.webContents.send('sync:state', state),
+    onAccess: (e) => accessLog?.record(e),
   });
   ipcMain.handle('transfer:info', () => ({ port: transferServer?.port || null, localOnly: false, host: transferServer?.host || '0.0.0.0', root: TRANSFER_DIR }));
   ipcMain.handle('transfer:requestChallenge', async (_e, input = {}) => { const host = String(input.host || ''); const port = Number(input.port || 7891); if (!host || !input.sessionId || !input.transferId || !input.senderId) return { ok: false, reasonCode: 'CHALLENGE_PARAMS_INVALID' }; try { const response = await globalThis.fetch(`http://${host}:${port}/api/pair/transfer-challenge`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: input.sessionId, senderId: input.senderId, transferId: input.transferId }) }); const body = await response.json(); if (!response.ok) { demoteUntrusted(String(input.senderId || ''), '文件传输'); return { ok: false, reasonCode: 'CHALLENGE_REJECTED' }; } return body; } catch { return { ok: false, reasonCode: 'CHALLENGE_UNREACHABLE' }; } });
   ipcMain.handle('transfer:selectFile', async () => { const picked = await dialog.showOpenDialog({ properties: ['openFile', 'openDirectory'], title: '选择要传输的文件或文件夹' }); if (picked.canceled || !picked.filePaths[0]) return null; const file = picked.filePaths[0]; const stat = fs.statSync(file); if (stat.isDirectory()) return { path: file, name: path.basename(file), kind: 'folder', size: 0, sha256: null }; const sha256 = await hashFile(file); return { path: file, name: path.basename(file), kind: 'file', size: stat.size, sha256 }; });
+
+  // ---- P2P 传输：发送 / 接收 / 状态（仅可信设备，无文件大小限制，分块流式） ----
+  const transferSends = new Map(); // transferId -> 发送进度
+  const TRANSFER_CHUNK = 5 * 1024 * 1024;
+  // 发起传输：取挑战 → 构造 manifest → 提交 offer（含 token）
+  ipcMain.handle('transfer:offer', async (_e, { targetAddress, targetPort = 49152, targetDeviceId, file } = {}) => {
+    if (!targetAddress || !targetDeviceId || !file?.path) return { ok: false, reasonCode: 'PARAMS_INVALID' };
+    const identity = loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), {});
+    const transferId = `transfer_${crypto.randomBytes(12).toString('hex')}`;
+    let real = file;
+    try {
+      // 文件夹：先在本地打包为 zip 再传输（无大小限制）
+      if (file.kind === 'folder') {
+        const zipPath = path.join(TRANSFER_DIR, 'tmp', `${transferId}.zip`);
+        fs.mkdirSync(path.dirname(zipPath), { recursive: true });
+        runCmd(IS_WIN ? 'tar' : '/usr/bin/zip', IS_WIN ? ['-a', '-c', '-f', zipPath, file.path] : ['-r', '-q', zipPath, file.path], { timeout: 600000 });
+        const st = fs.statSync(zipPath);
+        real = { path: zipPath, name: `${file.name}.zip`, kind: 'file', size: st.size, sha256: await hashFile(zipPath) };
+      }
+      // 1) 挑战：对端只对已配对（可信公钥）设备签发
+      const chResp = await globalThis.fetch(`http://${targetAddress}:${Number(targetPort) - 1}/api/pair/transfer-challenge`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ senderId: identity.deviceId, transferId }),
+      });
+      const ch = await chResp.json();
+      if (!chResp.ok || !ch.signedChallenge) return { ok: false, reasonCode: chResp.status === 403 ? 'UNTRUSTED' : 'CHALLENGE_FAILED', error: ch.error };
+      // 2) manifest + offer（token 供分块/状态鉴权）
+      const manifest = {
+        transferId, senderId: identity.deviceId, receiverId: String(targetDeviceId),
+        senderPublicKey: identity.identity?.publicKey || '',
+        name: real.name, kind: real.kind, size: real.size,
+        chunkSize: TRANSFER_CHUNK, chunkCount: Math.max(1, Math.ceil(real.size / TRANSFER_CHUNK)),
+        sha256: real.sha256,
+      };
+      const token = crypto.randomBytes(24).toString('hex');
+      const offResp = await globalThis.fetch(`http://${targetAddress}:${targetPort}/api/transfer/offer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ manifest, signedChallenge: ch.signedChallenge, senderName: identity.deviceName || identity.deviceId }),
+      });
+      const off = await offResp.json();
+      if (!offResp.ok) return { ok: false, reasonCode: 'OFFER_REJECTED', error: off.error };
+      transferSends.set(transferId, { transferId, file: real, host: targetAddress, port: targetPort, token, state: 'queued', sent: 0, total: real.size, chunkCount: manifest.chunkCount, error: '' });
+      // 3) 后台分块推送
+      pumpTransfer(transferSends.get(transferId));
+      return { ok: true, transferId, name: real.name, size: real.size, kind: real.kind };
+    } catch (error) {
+      return { ok: false, reasonCode: 'FAILED', error: String(error?.message || error) };
+    }
+  });
+  // 分块推送（主进程后台执行，不阻塞 UI）
+  async function pumpTransfer(info) {
+    if (!info || info.state === 'sending') return;
+    info.state = 'sending';
+    try {
+      const fd = fs.openSync(info.file.path, 'r');
+      try {
+        for (let i = 0; i < info.chunkCount; i += 1) {
+          const length = Math.min(TRANSFER_CHUNK, info.total - i * TRANSFER_CHUNK);
+          const buf = Buffer.alloc(length);
+          fs.readSync(fd, buf, 0, length, i * TRANSFER_CHUNK);
+          const resp = await globalThis.fetch(`http://${info.host}:${info.port}/transfer/${info.transferId}/chunk`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': length, 'X-Chunk-Index': i, Authorization: `Bearer ${info.token}` },
+            body: buf,
+          });
+          if (!resp.ok) { const b = await resp.json().catch(() => ({})); throw new Error(b.error || `分块 ${i} 上传失败`); }
+          info.sent += length;
+        }
+      } finally { fs.closeSync(fd); }
+      info.state = 'done';
+      logEvent('info', 'transfer', `已发送 ${info.file.name}（${info.total} 字节）`);
+    } catch (error) {
+      info.state = 'error';
+      info.error = String(error?.message || error);
+      logEvent('error', 'transfer', `发送 ${info.file.name} 失败: ${info.error}`);
+    }
+  }
+  // 本机发送任务进度
+  ipcMain.handle('transfer:sends', () => [...transferSends.entries()].map(([id, s]) => ({ transferId: id, name: s.file.name, state: s.state, sent: s.sent, total: s.total, error: s.error })));
+  // 接收端：待接收提议列表
+  ipcMain.handle('transfer:listOffers', () => {
+    if (!transferServer) return [];
+    return [...transferServer.sessions.entries()]
+      .filter(([, st]) => st.state === 'offered')
+      .map(([id, st]) => ({ transferId: id, senderName: st.senderName, name: st.manifest.name, kind: st.manifest.kind, size: st.manifest.size }));
+  });
+  // 接收端：接受（选目录）/ 拒绝
+  ipcMain.handle('transfer:decide', async (_e, { transferId, accept = false, targetDir = '' } = {}) => {
+    if (!transferServer) return { ok: false, reasonCode: 'NO_SERVER' };
+    const st = transferServer.sessions.get(String(transferId || ''));
+    if (!st) return { ok: false, reasonCode: 'SESSION_NOT_FOUND' };
+    let dir = targetDir;
+    if (accept && !dir) {
+      const picked = await dialog.showOpenDialog({ properties: ['openDirectory'], title: '选择接收目录' });
+      if (picked.canceled || !picked.filePaths[0]) return { ok: false, reasonCode: 'CANCELLED' };
+      dir = picked.filePaths[0];
+    }
+    const result = transferServer.decide(String(transferId), accept, dir, st.offerToken);
+    if (result.ok && accept) logEvent('info', 'transfer', `已接受 ${st.senderName} 的传输「${st.manifest.name}」→ ${dir}`);
+    if (result.ok && !accept) logEvent('info', 'transfer', `已拒绝 ${st.senderName} 的传输「${st.manifest.name}」`);
+    return result;
+  });
+  // 任意一端查询状态
+  ipcMain.handle('transfer:status', (_e, transferId) => {
+    const id = String(transferId || '');
+    const st = transferServer?.sessions?.get(id);
+    const sd = transferSends.get(id);
+    return {
+      server: st ? { state: st.state, targetDir: st.state === 'completed' ? st.targetDir : undefined } : null,
+      send: sd ? { state: sd.state, sent: sd.sent, total: sd.total, error: sd.error } : null,
+    };
+  });
+
   ipcMain.handle('services:ports', () => normalizeServicePorts(loadSettings().servicePorts || {}));
   ipcMain.handle('services:setPorts', (_e, ports = {}) => { const normalized = normalizeServicePorts(ports); const settings = loadSettings(); settings.servicePorts = normalized; saveSettings(settings); return { ok: true, ports: normalized, restartRequired: true }; });
   ipcMain.handle('services:health', async () => {
@@ -950,7 +1060,8 @@ function registerIpc() {
   });
 
   // ---- 轻量 API 同步共享清单 ----
-  ipcMain.handle('share:apiPull', async (_e, { host, port = 7890 } = {}) => {
+  /** 拉取指定主机的共享清单（复用：手动拉取 + 自动挂载轮询共用） */
+  async function pullSharesFromHost(host, port = 7890) {
     if (!host) throw new Error('请输入 Windows 主机地址');
     const identity = loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), {});
     const base = `http://${host}:${Number(port)}`;
@@ -983,7 +1094,8 @@ function registerIpc() {
     const shares = manifest.body.shares || [];
     logEvent('info', 'sync', `已从 ${host} 拉取 ${shares.length} 个共享（轻量 API）`);
     return shares;
-  });
+  }
+  ipcMain.handle('share:apiPull', (_e, { host, port } = {}) => pullSharesFromHost(host, port));
 
   // ---- 运行日志 ----
   ipcMain.handle('log:history', () => logBuffer.slice());
@@ -1048,6 +1160,58 @@ function registerIpc() {
     }
   });
 
+  // ---- 自动挂载（macOS）：Windows 端新共享自动挂载，无需手动操作 ----
+  // 每 60 秒轮询已配对在线设备拉共享清单，新增共享自动挂载（需已配置主机统一密码）；
+  // 全部过程写入运行日志，UI 侧在聚合挂载页有说明提示。
+  async function autoMountOnce() {
+    if (IS_WIN || !discoveryService) return;
+    const localId = loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), {}).deviceId;
+    const devs = discoveryService.list() || [];
+    for (const dev of devs) {
+      const ip = dev?.network?.preferredAddress;
+      if (!ip || dev?.deviceId === localId) continue;
+      let shares;
+      try {
+        shares = await pullSharesFromHost(ip, 7890);
+      } catch (error) {
+        // 离线/未配对/无共享服务的设备跳过，避免每轮刷屏
+        if (String(error?.message || error).includes('离线')) continue;
+        logEvent('warn', 'mount', `自动挂载轮询 ${ip} 共享清单失败: ${String(error?.message || error).slice(0, 140)}`);
+        continue;
+      }
+      const known = new Set(loadMounts().map((m) => `${m.host}/${m.shareName}`));
+      for (const s of shares || []) {
+        if (known.has(`${ip}/${s.shareName}`)) continue;
+        let cred = {};
+        try { cred = JSON.parse(hostCredentialStore?.get(ip) || '{}'); } catch { /* 未配置密码 */ }
+        if (!cred.password) {
+          logEvent('info', 'mount', `自动挂载跳过 ${s.shareName}：未配置 ${ip} 的主机统一密码（设备中心 → 主机账号维护）`);
+          continue;
+        }
+        const mount = {
+          host: ip,
+          shareName: s.shareName,
+          account: s.account || '',
+          password: cred.password,
+          mountPoint: path.join(os.homedir(), 'Shared', s.shareName),
+        };
+        try {
+          mountOne(mount, os.homedir());
+          saveMounts([...loadMounts(), { host: ip, shareName: s.shareName, account: mount.account, mountPoint: mount.mountPoint }]);
+          logEvent('info', 'mount', `已自动挂载 ${ip}/${s.shareName}（Windows 共享自动同步）`);
+        } catch (error) {
+          logEvent('warn', 'mount', `自动挂载 ${ip}/${s.shareName} 失败: ${String(error?.message || error).slice(0, 140)}`);
+        }
+      }
+    }
+  }
+
+  // 启动自动挂载轮询（首次 8 秒后，之后每 60 秒；仅 macOS）
+  if (IS_MAC) {
+    setTimeout(() => autoMountOnce().catch(() => {}), 8000);
+    autoMountTimer = setInterval(() => autoMountOnce().catch(() => {}), 60000);
+  }
+
   // ---- 主机账号（按 host 维护的 SMB 统一密码） ----
   // 列表聚合：所有出现过的主机 + 各自是否已设统一密码与更新时间
   ipcMain.handle('host:list', () => {
@@ -1097,23 +1261,30 @@ function registerIpc() {
     return { ok: true };
   });
 
-  // ---- 文件夹同步（主从、实时） ----
+  // ---- 文件同步（多任务：一次配置 = 一条同步任务，运行中不可改配置） ----
   ipcMain.handle('sync:state', () => syncService?.getState() || null);
-  ipcMain.handle('sync:setConfig', async (_e, patch = {}) => {
-    const next = syncService.updateConfig(patch);
-    await syncService.apply();
-    return next;
-  });
-  ipcMain.handle('sync:start', () => syncService.apply({ start: true }));
-  ipcMain.handle('sync:stop', () => syncService.apply({ start: false }));
-  ipcMain.handle('sync:runNow', () => syncService.runCycle({ fullScan: true, reason: 'manual' }));
-  ipcMain.handle('sync:resetIndex', () => syncService.resetIndex());
-  ipcMain.handle('sync:trash', () => syncService.listTrash());
-  ipcMain.handle('sync:restore', (_e, { stamp, path: rel } = {}) => syncService.restoreFromTrash(stamp, rel));
-  ipcMain.handle('sync:purgeTrash', (_e, opts = {}) => syncService.purgeTrash(opts));
+  ipcMain.handle('sync:task:add', (_e, patch = {}) => syncService.addTask(patch));
+  ipcMain.handle('sync:task:update', (_e, { id, patch = {} } = {}) => syncService.updateTask(id, patch));
+  ipcMain.handle('sync:task:remove', (_e, id) => syncService.removeTask(id));
+  ipcMain.handle('sync:task:start', (_e, id) => syncService.startTask(id));
+  ipcMain.handle('sync:task:stop', (_e, id) => syncService.stopTask(id));
+  ipcMain.handle('sync:task:runNow', (_e, id) => syncService.runNow(id));
+  ipcMain.handle('sync:task:resetIndex', (_e, id) => syncService.resetIndex(id));
+  ipcMain.handle('sync:task:trash', (_e, id) => syncService.trash(id));
+  ipcMain.handle('sync:task:restore', (_e, { id, stamp, path: rel } = {}) => syncService.restore(id, { stamp, path: rel }));
+  ipcMain.handle('sync:task:purgeTrash', (_e, { id, ...opts } = {}) => syncService.purgeTrash(id, opts));
   ipcMain.handle('sync:pickDir', async () => {
     const picked = await dialog.showOpenDialog({ properties: ['openDirectory'], title: '选择同步目录' });
     return picked.canceled || !picked.filePaths[0] ? null : picked.filePaths[0];
+  });
+  // 列出目录一级条目（供忽略规则可视化选择；只读，不进入子目录）
+  ipcMain.handle('sync:listDir', async (_e, dir = '') => {
+    try {
+      const entries = fs.readdirSync(String(dir || ''), { withFileTypes: true });
+      return entries.map((e) => ({ name: e.name, isDir: e.isDirectory() }));
+    } catch {
+      return [];
+    }
   });
 
   // ---- 远程唤醒（WOL）----
@@ -1180,19 +1351,9 @@ function registerIpc() {
     return result;
   });
 
-  // ---- 局域网设备（只读 ARP，不主动扫描） ----
-  let lanDevicesCache = [];
-  ipcMain.handle('lan:list', () => {
-    try {
-      const output = runCmd(IS_WIN ? 'arp' : '/usr/sbin/arp', ['-a'], { timeout: 3000 });
-      lanDevicesCache = mergeLanDevices(lanDevicesCache, parseArpTable(output));
-      const selfAddrs = new Set(getLocalIPs().map((a) => a.ip));
-      return lanDevicesCache.filter((d) => !selfAddrs.has(d.ip));
-    } catch (err) {
-      logEvent('warn', 'lan', `读取 ARP 表失败: ${err.message || err}`);
-      return lanDevicesCache;
-    }
-  });
+  // ---- 访问过本机的设备（群聊/共享清单/同步等入口记录，不再扫描 ARP） ----
+  ipcMain.handle('access:list', () => accessLog.list());
+  ipcMain.handle('access:clear', () => { accessLog.clear(); return { ok: true }; });
 
   // ---- 群聊 ----
   ipcMain.handle('chat:info', () => ({
@@ -1252,8 +1413,10 @@ let pairingServer = null;
 let transferServer = null;
 let trustedCredentialStore = null;
 let hostCredentialStore = null;
+let accessLog = null;
 let discoveryService = null;
 let syncService = null;
+let autoMountTimer = null;
 /**
  * 本机解除对某设备的信任，并立即把变更推给界面。
  * reason=remote 表示是对端主动送达的撤销，界面据此区分「从未配对」和「被对方解除」。
@@ -1323,7 +1486,34 @@ function trustedDevicePublicKey(deviceId) {
 async function startTransfer() {
   if (transferServer) return transferServer;
   const configured = normalizeServicePorts(loadSettings().servicePorts || {});
-  transferServer = await startTransferServer({ port: configured.transfer, root: TRANSFER_DIR, verifyOfferChallenge: (signed, manifest) => { try { if (!manifest.senderPublicKey) return false; return require('../core/transfer').verifyTransferChallenge(signed, crypto.createPublicKey(manifest.senderPublicKey), { senderId: manifest.senderId, receiverId: loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), {}).deviceId, transferId: manifest.transferId }); } catch { return false; } } });
+  const localIdentityForTransfer = loadOrCreateIdentity(path.join(DATA_DIR, 'device.json'), {}).deviceId;
+  // 接收端授权：只接受「配对时留存公钥」的已配对设备发起的传输；
+  // chunk/status 请求须带 offer 时记录的 token（Bearer）。
+  const transferAuth = (manifest, bearer) => {
+    try {
+      const state = transferServer?.sessions?.get(String(manifest?.transferId || ''));
+      return Boolean(state && state.offerToken && bearer && state.offerToken === bearer);
+    } catch { return false; }
+  };
+  transferServer = await startTransferServer({
+    port: configured.transfer,
+    root: TRANSFER_DIR,
+    verifyOfferChallenge: (signed, manifest) => {
+      try {
+        const trustedPub = trustedDevicePublicKey(String(manifest.senderId || ''));
+        if (!trustedPub || !manifest.senderPublicKey) return false;
+        // 提供方公钥必须等于配对时留存的公钥，防止伪造 senderId 自签
+        const got = crypto.createPublicKey(manifest.senderPublicKey).export({ type: 'spki', format: 'pem' });
+        const want = crypto.createPublicKey(trustedPub).export({ type: 'spki', format: 'pem' });
+        if (got !== want) return false;
+        return require('../core/transfer').verifyTransferChallenge(signed, crypto.createPublicKey(trustedPub), { senderId: manifest.senderId, receiverId: localIdentityForTransfer, transferId: manifest.transferId });
+      } catch { return false; }
+    },
+    // offer 在会话创建前执行，由 verifyOfferChallenge（可信公钥+签名）把关
+    authorizeOffer: () => true,
+    authorize: (manifest, bearer) => transferAuth(manifest, bearer),
+    authorizeStatus: (manifest, bearer) => transferAuth(manifest, bearer),
+  });
   logEvent('info', 'transfer', `原生传输服务已启动（等待受认证传输会话）：${transferServer.host}:${transferServer.port}`);
   return transferServer;
 }
@@ -1366,6 +1556,7 @@ function startChat() {
     },
     // 脱敏清单：只有 shareName / account / unified，口令不出网
     shareManifest: shareManifestForSync,
+    onAccess: (e) => accessLog?.record(e),
   })
     .then((info) => {
       chatInfo = info;
@@ -1456,5 +1647,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   // 停掉监听与同步服务，避免残留句柄阻止进程退出
+  if (autoMountTimer) clearInterval(autoMountTimer);
   syncService?.dispose().catch(() => {});
 });

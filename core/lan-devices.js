@@ -80,7 +80,7 @@ function mergeLanDevices(stored, incoming, now = Date.now(), ttlMs = DEFAULT_TTL
     });
   }
   const result = [];
-  for (const [ip, device] of merged) {
+  for (const [, device] of merged) {
     if (Date.parse(device.lastSeenAt || 0) < now - ttlMs) continue; // 过期即丢，ARP 表本身会老化
     result.push(device);
   }

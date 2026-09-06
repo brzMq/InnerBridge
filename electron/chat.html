@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
-<title>InnerNet 群聊</title>
+<title>InnerBridge 群聊</title>
 <style>
   :root, :root[data-theme="light"] {
     --bg: #f5f7fa; --bg2: #ffffff; --bg3: #eef1f5; --border: #d8dee8;
@@ -145,7 +145,7 @@
 </head>
 <body>
 <header>
-  <h1><span id="dot" class="dot"></span>InnerNet 群聊</h1>
+  <h1><span id="dot" class="dot"></span>InnerBridge 群聊</h1>
   <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
     <span id="status">连接中…</span>
     <button id="themeBtn" title="切换主题">◐ 跟随系统</button>
@@ -164,7 +164,7 @@
       <button id="chooseFolderBtn">选择文件夹</button>
     </div>
   </div>
-  <input id="fileInput" type="file" multiple accept="image/*,.txt,.text,.md,.markdown,.rst,.adoc,.csv,.tsv,.log,.json,.json5,.jsonl,.yaml,.yml,.toml,.ini,.conf,.cfg,.properties,.env,.xml,.xsl,.xsd,.sql,.js,.mjs,.cjs,.jsx,.ts,.tsx,.vue,.svelte,.astro,.py,.rb,.php,.java,.go,.rs,.c,.h,.cc,.cpp,.hpp,.cs,.swift,.kt,.kts,.sh,.bash,.zsh,.fish,.bat,.cmd,.ps1,.psm1,.html,.htm,.css,.scss,.less,.graphql,.gql,.tex,.rtf,.svg,.zip,.7z,.rar,.tar,.gz,.tgz,.bz2,.xz" hidden />
+  <input id="fileInput" type="file" multiple hidden />
   <input id="folderInput" type="file" webkitdirectory multiple hidden />
   <button id="sendBtn">发送</button>
 </footer>
@@ -199,6 +199,17 @@
     var replyTo = null;
     var online = 0;
     var connected = false;
+    var followLatest = true;
+    function scrollToLatest(force) {
+      if (!force && !followLatest) return;
+      requestAnimationFrame(function () {
+        list.scrollTop = list.scrollHeight;
+        requestAnimationFrame(function () { list.scrollTop = list.scrollHeight; });
+      });
+    }
+    list.addEventListener('scroll', function () {
+      followLatest = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
+    });
     nickBox.value = nick;
     nickBox.addEventListener('change', function () {
       nick = nickBox.value.trim() || nick;
@@ -237,7 +248,7 @@
           list.innerHTML = '<div class="hint-msg">群聊已就绪，发第一条消息吧</div>';
         }
         d.messages.forEach(render);
-        list.scrollTop = list.scrollHeight;
+        scrollToLatest(true);
       });
     };
     es.onerror = function () {
@@ -256,7 +267,7 @@
     });
     es.onmessage = function (e) {
       render(JSON.parse(e.data));
-      list.scrollTop = list.scrollHeight;
+      scrollToLatest(false);
     };
 
     function copyText(t) {
@@ -307,6 +318,7 @@
         img.alt = '图片';
         img.loading = 'lazy';
         img.title = '点击复制图片';
+        img.addEventListener('load', function () { scrollToLatest(false); });
         img.addEventListener('click', function () { copyImage(m.image); });
         img.addEventListener('error', function () { this.style.display = 'none'; });
         div.querySelector('.bubble').appendChild(img);
@@ -498,11 +510,13 @@
     function doUpload(file, folder) {
       var image = /^image\//.test(file.type || '');
       var archive = /\.(zip|7z|rar|tar|gz|tgz|bz2|xz)$/i.test(file.name || '');
+      var textFile = /\.(txt|text|md|markdown|rst|adoc|csv|tsv|log|json|json5|jsonl|ya?ml|toml|ini|conf|cfg|properties|env|xml|xsl|xsd|sql|js|mjs|cjs|jsx|ts|tsx|vue|svelte|astro|py|rb|php|java|go|rs|c|h|cc|cpp|hpp|cs|swift|kt|kts|sh|bash|zsh|fish|bat|cmd|ps1|psm1|html?|css|scss|less|graphql|gql|tex|rtf|svg)$/i.test(file.name || '');
       var imageByName = /\.(png|jpe?g|gif|webp|bmp|tiff?|ico|avif|hei[cf])$/i.test(file.name || '');
       image = image || imageByName;
       if (image && file.size > 5 * 1024 * 1024) { alert('图片不能超过 5MB'); return Promise.resolve(); }
-      if (!image && !archive && file.size > 1024 * 1024) { alert('文本文件不能超过 1MB'); return Promise.resolve(); }
+      if (textFile && file.size > 1024 * 1024) { alert('文本文件不能超过 1MB'); return Promise.resolve(); }
       if (archive && file.size > 200 * 1024 * 1024) { alert('压缩文件不能超过 200MB'); return Promise.resolve(); }
+      if (!image && !textFile && !archive && file.size > 200 * 1024 * 1024) { alert('单个文件不能超过 200MB'); return Promise.resolve(); }
       return fetch('/api/upload?name=' + encodeURIComponent(file.name || '') + '&requesterId=' + encodeURIComponent(requesterId) + (folder ? '&folder=1' : ''), {
         method: 'POST',
         headers: { 'Content-Type': file.type || 'application/octet-stream' },

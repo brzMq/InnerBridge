@@ -38,6 +38,7 @@ const DEFAULT_TASK = {
   maxAttempts: 3,
   ignore: '', // 换行分隔的 gitignore 风格忽略规则
   cleanupIgnoredOnSlave: false, // false=从端保留排除项；true=视为失效并移入从端回收区
+  peerLinkedAt: null, // 主端成功访问从端任务后写入；已关联时不再重复发送邀请
   enabled: false,
 };
 
@@ -175,6 +176,7 @@ function createSyncService({
     const task = findTask(taskId);
     if (!task) return { ok: false, error: '同步任务不存在' };
     if (task.role !== 'master') return { ok: false, error: '只有主端任务可以邀请从端' };
+    if (task.peerLinkedAt) return { ok: false, reason: 'ALREADY_LINKED', error: '该任务已与从端建立有效关联，无需重复邀请' };
     if (!task.peerAddress || !task.peerDeviceId) return { ok: false, error: '未指定从端设备' };
     try {
       const rt = runtimeFor(task.id);
@@ -285,8 +287,8 @@ function createSyncService({
     const size = stat.size;
     const sha256 = await hashFile(abs);
     const begin = await withRetry(
-      () => post(task, '/api/sync/begin', {
-        ...challengePayloadSync(task, rt),
+      async () => post(task, '/api/sync/begin', {
+        ...(await authPayload(task, rt)),
         taskId: task.id, path: rel, size, mtimeMs: Math.round(stat.mtimeMs), sha256, chunkSize: Number(task.chunkSize) || DEFAULT_CHUNK_SIZE,
       }),
       `发起传输 ${rel}`,
@@ -297,8 +299,8 @@ function createSyncService({
     for (let i = 0; i < begin.chunkCount; i += 1) {
       const buf = readChunk(abs, i, chunkSize, size);
       const result = await withRetry(
-        () => post(task, '/api/sync/chunk', {
-          ...challengePayloadSync(task, rt),
+        async () => post(task, '/api/sync/chunk', {
+          ...(await authPayload(task, rt)),
           taskId: task.id, transferId, index: i, data: buf.toString('base64'),
         }),
         `推送分块 ${rel}#${i}`,
@@ -307,7 +309,7 @@ function createSyncService({
       if (!result.ok) throw new Error(`分块 ${i} 未被接受`);
     }
     const commit = await withRetry(
-      () => post(task, '/api/sync/commit', { ...challengePayloadSync(task, rt), taskId: task.id, transferId }),
+      async () => post(task, '/api/sync/commit', { ...(await authPayload(task, rt)), taskId: task.id, transferId }),
       `提交 ${rel}`,
       Number(task.maxAttempts) || 3,
     );
@@ -347,10 +349,14 @@ function createSyncService({
       // 全量校验轮：拿从端清单比对，把从端多出来的文件也清掉
       if (fullScan) {
         const remote = await withRetry(
-          () => post(task, '/api/sync/list', { ...challengePayloadSync(task, rt), taskId }),
+          async () => post(task, '/api/sync/list', { ...(await authPayload(task, rt)), taskId }),
           '拉取从端清单',
           Number(task.maxAttempts) || 3,
         );
+        if (!task.peerLinkedAt) {
+          task.peerLinkedAt = new Date().toISOString();
+          persistTasks();
+        }
         const remoteFiles = Array.isArray(remote.files) ? remote.files : [];
         const remoteByPath = new Map(remoteFiles.map((file) => [normalizeRelPath(file.path), file]));
         for (const [rel, meta] of current) {
@@ -401,7 +407,7 @@ function createSyncService({
       if (toTrash.length) {
         try {
           const result = await withRetry(
-            () => post(task, '/api/sync/trash', { ...challengePayloadSync(task, rt), taskId, paths: toTrash }),
+            async () => post(task, '/api/sync/trash', { ...(await authPayload(task, rt)), taskId, paths: toTrash }),
             '清理从端失效文件',
             Number(task.maxAttempts) || 3,
           );
@@ -418,7 +424,7 @@ function createSyncService({
       }
 
       try {
-        await post(task, '/api/sync/purge', { ...challengePayloadSync(task, rt), taskId, retentionDays: Number(task.trashRetentionDays) });
+        await post(task, '/api/sync/purge', { ...(await authPayload(task, rt)), taskId, retentionDays: Number(task.trashRetentionDays) });
       } catch (error) {
         if (error.status !== 409) logEvent('warn', 'sync', `清理从端过期回收区失败（不影响同步）：${error.message}`);
       }
@@ -686,6 +692,12 @@ function createSyncService({
       if (!task) throw new Error('同步任务不存在');
       assertStopped(task); // 运行中的任务不可改配置
       const next = normalizeTask({ ...task, ...patch, id: task.id, enabled: task.enabled, role: task.role });
+      if (task.role === 'master' && (
+        next.peerDeviceId !== task.peerDeviceId
+        || next.peerAddress !== task.peerAddress
+        || Number(next.peerPort) !== Number(task.peerPort)
+        || next.pairKey !== task.pairKey
+      )) next.peerLinkedAt = null;
       tasks = tasks.map((t) => (t.id === id ? next : t));
       persistTasks();
       emitState();

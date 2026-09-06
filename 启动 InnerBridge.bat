@@ -1,6 +1,8 @@
 @echo off
 chcp 65001 >nul
-cd /d "%~dp0"
+title InnerBridge 开发启动器
+set "PROJECT_DIR=%~dp0"
+cd /d "%PROJECT_DIR%"
 set "ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/"
 
 net session >nul 2>&1

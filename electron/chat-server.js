@@ -24,6 +24,7 @@ const MAX_TEXT = 2000;
 const MAX_IMG = 5 * 1024 * 1024; // 图片大小上限 5MB
 const MAX_TEXT_FILE = 1 * 1024 * 1024;
 const MAX_ARCHIVE = 200 * 1024 * 1024;
+const MAX_GENERIC_FILE = 200 * 1024 * 1024;
 // 允许上传的文本文件扩展名（白名单）
 const TEXT_EXTS = new Set([
   'txt', 'text', 'md', 'markdown', 'rst', 'adoc', 'csv', 'tsv', 'log', 'json', 'json5', 'jsonl',
@@ -182,7 +183,7 @@ function saveTextFile(filesDir, buf, origName) {
 }
 
 function cleanUploadName(origName, fallback) {
-  return String(origName || '').replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 120) || fallback;
+  return String(origName || '').replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 80) || fallback;
 }
 
 function uploadPolicy(origName, contentType) {
@@ -192,7 +193,7 @@ function uploadPolicy(origName, contentType) {
   }
   if (ARCHIVE_EXTS.has(ext)) return { kind: 'archive', maxBytes: MAX_ARCHIVE };
   if (TEXT_EXTS.has(ext)) return { kind: 'text', maxBytes: MAX_TEXT_FILE };
-  throw new Error('不支持的文件类型（支持图片、文本及 zip/7z/rar/tar/gz 等压缩文件）');
+  return { kind: 'file', maxBytes: MAX_GENERIC_FILE };
 }
 
 function saveArchiveFile(filesDir, buf, origName, folder) {
@@ -204,6 +205,16 @@ function saveArchiveFile(filesDir, buf, origName, folder) {
   const stored = `${Date.now()}-${crypto.randomBytes(3).toString('hex')}.${ext}`;
   fs.writeFileSync(path.join(filesDir, stored), buf);
   return { url: `/file/${stored}`, name: clean, size: buf.length, kind: folder ? 'folder' : 'archive' };
+}
+
+function saveGenericFile(filesDir, buf, origName) {
+  if (!filesDir) throw new Error('文件存储未配置');
+  const clean = cleanUploadName(origName, 'file');
+  const ext = path.extname(clean).slice(1).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12);
+  fs.mkdirSync(filesDir, { recursive: true });
+  const stored = `${Date.now()}-${crypto.randomBytes(3).toString('hex')}${ext ? `.${ext}` : ''}`;
+  fs.writeFileSync(path.join(filesDir, stored), buf);
+  return { url: `/file/${stored}`, name: clean, size: buf.length, kind: 'file' };
 }
 
 function startChatServer(preferredPort = 7890, opts = {}) {
@@ -313,6 +324,12 @@ function startChatServer(preferredPort = 7890, opts = {}) {
           onAccess({ requesterId, ip: req.socket.remoteAddress, kind: 'chat' });
           return sendJSON(res, 200, { ok: true, ...f });
         }
+        if (policy.kind === 'file') {
+          const f = saveGenericFile(filesDir, buf, origName);
+          onEvent({ level: 'info', source: 'chat', message: `文件已上传: ${f.name} (${f.size} 字节)` });
+          onAccess({ requesterId, ip: req.socket.remoteAddress, kind: 'chat' });
+          return sendJSON(res, 200, { ok: true, ...f });
+        }
         const f = saveTextFile(filesDir, buf, origName);
         onEvent({ level: 'info', source: 'chat', message: `文本文件已上传: ${f.name} (${f.size} 字节)` });
         onAccess({ requesterId, ip: req.socket.remoteAddress, kind: 'chat' });
@@ -376,7 +393,7 @@ function startChatServer(preferredPort = 7890, opts = {}) {
             ? {
                 url: body.file.url,
                 name: body.file.name.slice(0, 80),
-                kind: ['text', 'archive', 'folder'].includes(body.file.kind) ? body.file.kind : 'text',
+                kind: ['text', 'file', 'archive', 'folder'].includes(body.file.kind) ? body.file.kind : 'file',
                 size: Number.isFinite(body.file.size) && body.file.size >= 0 ? Math.floor(body.file.size) : 0,
               }
             : null;

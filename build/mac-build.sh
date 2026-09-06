@@ -1,12 +1,13 @@
 #!/bin/bash
 # ============================================
-# InnerNet macOS 一键打包脚本
+# InnerBridge macOS 一键打包脚本
 # 用法：在 Mac 上执行  bash build/mac-build.sh
 # ============================================
 set -e
-cd "$(dirname "$0")/.."
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$PROJECT_DIR"
 
-echo "📦 InnerNet macOS 打包开始"
+echo "📦 InnerBridge macOS 打包开始"
 echo "--------------------------"
 
 # 1. 检查 Node.js（与开发、CI 共用同一版本规则）
@@ -43,5 +44,5 @@ echo ""
 echo "✅ 完成！产物在 release/ 目录："
 ls -lh release/*.dmg release/*.zip 2>/dev/null || ls -lh release/
 echo ""
-echo "安装：双击 .dmg → 把 InnerNet 拖入「应用程序」"
-echo "首次打开未签名应用：右键图标 → 打开（或执行 xattr -cr /Applications/InnerNet*.app）"
+echo "安装：双击 .dmg → 把 InnerBridge 拖入「应用程序」"
+echo "首次打开未签名应用：右键图标 → 打开（或执行 xattr -cr /Applications/InnerBridge*.app）"

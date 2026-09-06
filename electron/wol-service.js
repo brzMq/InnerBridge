@@ -30,7 +30,7 @@ function sendMagicPacket(packet, broadcastAddresses, { port = 9, times = 3 } = {
   });
 }
 
-// 探测对端 InnerNet 是否已上线（聊天服务是所有实例必开的服务）
+// 探测对端 InnerBridge 是否已上线（聊天服务是所有实例必开的服务）
 function probeOnline(address, port, { timeoutMs = 1500 } = {}) {
   return new Promise((resolve) => {
     const request = http.get({ host: address, port, path: '/', timeout: timeoutMs }, (res) => {

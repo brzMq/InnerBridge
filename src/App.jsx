@@ -107,7 +107,7 @@ export default function App() {
         <div className="brand">
           <span className="logo">◇</span>
           <div>
-            <h1>InnerNet 内网共享</h1>
+            <h1>InnerBridge</h1>
             <p className="host">
               {sys.hostname} · {sys.platform === 'win32' ? 'Windows 共享端' : 'macOS 挂载端'}
             </p>

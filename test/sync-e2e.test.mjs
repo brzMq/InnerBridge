@@ -151,6 +151,14 @@ test('主端新增文件 → 从端落盘且内容一致', async () => {
   assert.equal(fs.readFileSync(path.join(slaveRoot, 'sub/b.txt'), 'utf8'), 'nested content');
 });
 
+test('主端确认从端任务有效后持久化关联状态并拒绝重复邀请', async () => {
+  const task = masterService.listTasks().find((item) => item.id === taskId);
+  assert.match(task.peerLinkedAt, /^\d{4}-\d{2}-\d{2}T/);
+  const repeated = await masterService.inviteTask(taskId);
+  assert.equal(repeated.ok, false);
+  assert.equal(repeated.reason, 'ALREADY_LINKED');
+});
+
 test('主端修改文件 → 从端覆盖更新', async () => {
   await ensureStarted();
   fs.writeFileSync(path.join(masterRoot, 'a.txt'), 'updated content');

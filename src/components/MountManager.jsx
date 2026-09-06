@@ -177,9 +177,19 @@ export default function MountManager({ sys }) {
     });
   }, []);
 
+  const refreshMountStatus = useCallback(async () => {
+    setMounts(await window.api.mounts.list());
+  }, []);
+
   useEffect(() => {
     refresh().catch((e) => show(String(e.message || e), false));
   }, [refresh, show]);
+
+  // 后台守护可能在网络恢复后自行完成挂载，页面停留期间定时同步真实状态。
+  useEffect(() => {
+    const timer = globalThis.setInterval(() => refreshMountStatus().catch(() => {}), 10000);
+    return () => globalThis.clearInterval(timer);
+  }, [refreshMountStatus]);
 
   const applyAutofs = async () => {
     if (!mounts.length) return show('请先添加共享', false);
@@ -196,6 +206,7 @@ export default function MountManager({ sys }) {
     } catch (e) {
       show(String(e.message || e), false);
     } finally {
+      await refreshMountStatus().catch(() => {});
       setBusy(false);
     }
   };
@@ -222,6 +233,7 @@ export default function MountManager({ sys }) {
         show(`${parts.join('，')}，位置：${root || '~/Shared'}`);
       }
     } finally {
+      await refreshMountStatus().catch(() => {});
       setBusy(false);
     }
   };
@@ -234,6 +246,7 @@ export default function MountManager({ sys }) {
     } catch (e) {
       show(String(e.message || e), false);
     } finally {
+      await refreshMountStatus().catch(() => {});
       setBusy(false);
     }
   };
@@ -251,6 +264,7 @@ export default function MountManager({ sys }) {
     } catch (e) {
       show(String(e.message || e), false);
     } finally {
+      await refreshMountStatus().catch(() => {});
       setBusy(false);
     }
   };
@@ -401,6 +415,9 @@ export default function MountManager({ sys }) {
                     )}
                   </div>
                 </div>
+                <span className={`badge mount-status ${m.mounted ? 'ok' : 'neutral'}`}>
+                  {m.mounted ? '已挂载' : '未挂载'}
+                </span>
                 <div className="mount-actions">
                   {mode === 'manual' && (
                     <button className="btn small" onClick={() => mountOneItem(m)} disabled={busy}>

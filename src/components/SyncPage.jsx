@@ -259,7 +259,7 @@ function TaskForm({ task, peers, onDone, onError }) {
       )}
 
       <div className="modal-foot" style={{ gridColumn: '1 / -1' }}>
-        <button className="btn" onClick={onDone}>取消</button>
+        <button className="btn" onClick={() => onDone()}>取消</button>
         <button className="btn primary" onClick={submit}>{editing ? '保存' : '创建任务'}</button>
       </div>
     </div>
@@ -397,6 +397,7 @@ export default function SyncPage({ invitation = null, onInvitationHandled = () =
       {tasks.map((t) => {
         const s = t.status || {};
         const running = Boolean(s.started || s.running);
+        const peerLinked = Boolean(t.peerLinkedAt || s.lastSyncAt);
         return (
           <div key={t.id} className="settings" style={{ marginBottom: 14 }}>
             <div className="setting-row">
@@ -426,7 +427,12 @@ export default function SyncPage({ invitation = null, onInvitationHandled = () =
             </div>
             <div className="setting-row" style={{ borderTop: '1px dashed var(--border)', paddingTop: 12, marginTop: 4 }}>
               <span className="k">操作</span>
-              {t.role === 'master' && <button className="btn" onClick={() => invitePeer(t)} disabled={busy}>邀请从端</button>}
+              {t.role === 'master' && (
+                <button className="btn" onClick={() => invitePeer(t)} disabled={busy || peerLinked}
+                  title={peerLinked ? `已于 ${new Date(t.peerLinkedAt || s.lastSyncAt).toLocaleString()} 与从端建立同步关联` : '通知从端创建对应同步任务'}>
+                  {peerLinked ? '从端已关联' : '邀请从端'}
+                </button>
+              )}
               {running ? (
                 <>
                   {t.role === 'master' && (

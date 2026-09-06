@@ -12,7 +12,7 @@ const actual = { major, minor, patch };
 const supported = major === REQUIRED.major && compareVersion(actual, REQUIRED) >= 0;
 
 if (!supported) {
-  console.error(`InnerNet 需要 Node.js >=24.19.0 <25，当前版本为 v${process.versions.node}。`);
+  console.error(`InnerBridge 需要 Node.js >=24.19.0 <25，当前版本为 v${process.versions.node}。`);
   console.error('请切换到 Node.js v24.19.0 后重新执行 npm install。');
   process.exit(1);
 }

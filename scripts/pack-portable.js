@@ -10,7 +10,7 @@ const pkg = require('../package.json');
 const version = pkg.version;
 const releaseDir = path.join(__dirname, '..', 'release');
 const unpacked = path.join(releaseDir, 'win-unpacked');
-const folderName = `InnerNet-Portable-${version}-win-x64`;
+const folderName = `InnerBridge-Portable-${version}-win-x64`;
 const staging = path.join(releaseDir, folderName);
 const zipFile = path.join(releaseDir, `${folderName}.zip`);
 

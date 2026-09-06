@@ -1,15 +1,16 @@
-# InnerNet 内网共享（统一源码版）
+# InnerBridge（统一源码版）
 
-> InnerNet 2.0 开发线：P0-P5 功能已在代码中实现并通过自动化验证（131 项测试全绿）。P3 安全配对已完成真实双机验收与公钥留存；P4 传输安全信道（Ed25519 挑战签名）已重构完整链路（提议/接收确认/发送队列/文件夹 zip 打包），双机真机端到端验证仍属 P6；P5 局域网设备「访问过本机的设备」只读展示与远程唤醒（WOL）已实现。1.0 稳定功能保持兼容；P6 集成/发布打包尚未开始。
+> InnerBridge 0.2：P0-P5 功能已完成，当前通过 134 项自动化测试、ESLint 与生产构建检查。安全配对、P2P 传输、文件同步、访问记录、WOL、跨端通知和统一界面均已接入；P2P 文件夹默认无压缩传输并在接收端还原目录，也可按设置压缩为 ZIP。项目已进入 0.2.0 发布打包阶段。
 
 同一套源码同时支持 Windows 共享端和 macOS 挂载端。应用根据运行平台自动显示对应功能，不再维护两份代码。
 
 ## 当前交付状态
 
-- 2.0 独立维护目录：`/Users/brz/MyProject/innerNet-2.0.0`
+- 当前统一源码目录：`/Users/brz/MyProject/InnerBridge`。
 - 1.0 目录和旧目录仅作历史参考，不再双向同步代码。
 - 干净源码约 1 MB，不包含依赖、构建产物、用户配置或运行日志。
-- Node.js 24.19.0 + Electron 44 环境下，当前 `npm run check` 通过：ESLint、131 项测试（含群聊、发现、配对、传输、同步、WOL 与访问日志测试）和前端构建。
+- Node.js 24.19.0 + Electron 44 环境下，当前 `npm run check` 通过：ESLint、134 项测试（含群聊、发现、配对、传输、同步、WOL 与访问日志测试）和前端构建。
+- macOS Apple Silicon 0.2.0 发布包已重新生成，并通过 DMG/ZIP 完整性与隔离启动检查；未配置 Apple Developer ID，首次打开方式见[项目使用指南](docs/项目使用指南.md)。Windows x64 安装包应在 Windows 环境执行 `npm run build:win` 生成。
 
 ## 从零开始
 
@@ -24,7 +25,7 @@
 Windows 共享端请在“管理员 PowerShell”中执行：
 
 ```powershell
-cd C:\path\to\innerNet-2.0.0
+cd C:\path\to\InnerBridge
 npm install
 npm run runtime:check
 npm run dev
@@ -33,7 +34,7 @@ npm run dev
 macOS 挂载端请在终端中执行：
 
 ```bash
-cd /path/to/innerNet-2.0.0
+cd /path/to/InnerBridge
 npm install
 npm run runtime:check
 npm run dev
@@ -45,15 +46,15 @@ Electron 44 的 npm 包不再依赖 `postinstall` 自动下载二进制，因此
 
 ### 一键脚本执行
 
-- Windows：双击 [`启动 InnerNet.bat`](<启动 InnerNet.bat>)。脚本是 CRLF 换行，会请求管理员权限、检查 Node 24.19.0、首次自动安装依赖、补齐 Electron 二进制，然后启动 6300 端口的开发模式。
-- macOS：双击 [`启动 InnerNet.command`](<启动 InnerNet.command>)。脚本会检查 Node 24.19.0、首次自动安装依赖，然后启动开发模式。
+- Windows：双击 [`启动 InnerBridge.bat`](<启动 InnerBridge.bat>)。脚本是 CRLF 换行，会请求管理员权限、检查 Node 24.19.0、首次自动安装依赖、补齐 Electron 二进制，然后启动 6300 端口的开发模式。
+- macOS：双击 [`启动 InnerBridge.command`](<启动 InnerBridge.command>)。脚本会检查 Node 24.19.0、首次自动安装依赖，然后启动开发模式。
 
 两个脚本都设置 Electron 镜像；Node 版本不符合要求时会停止并显示切换提示。
 
 ## 项目结构
 
 ```text
-innerNet-2.0.0/
+InnerBridge/
 ├── electron/                 # Electron 主进程、IPC、SMB、群聊与安全服务
 │   ├── main.js               # 按 Windows/macOS 启用对应能力，注册全部 IPC
 │   ├── preload.js             # 安全暴露 IPC API（host/sync/lan/wol/revocation 等）
@@ -87,22 +88,22 @@ innerNet-2.0.0/
 │   │   ├── SyncPage.jsx       # 文件夹同步配置与状态
 │   │   └── ...
 │   └── styles.css             # 公共主题与布局
-├── test/                     # Node 原生单元/集成测试（27 个文件，131 项用例）
+├── test/                     # Node 原生单元/集成测试（134 项用例）
 ├── scripts/                  # 运行环境检查和打包辅助脚本
 ├── build/                    # 图标和 macOS 打包脚本
 ├── docs/                     # 从零开始、架构、联调与版本排障文档
 ├── package.json              # Node 24/Electron 44 依赖、6300 端口与命令
 ├── package-lock.json         # 唯一依赖锁文件
 ├── .nvmrc / .node-version    # Node.js v24.19.0
-├── 启动 InnerNet.bat         # Windows 一键启动
-└── 启动 InnerNet.command     # macOS 一键启动
+├── 启动 InnerBridge.bat         # Windows 一键启动
+└── 启动 InnerBridge.command     # macOS 一键启动
 ```
 
 ## 两端职责
 
 - Windows：创建 SMB 共享、校验/修复共享 ACL、提供已签名的共享清单接口和群聊服务。
 - macOS：通过轻量 API 拉取共享清单，手动挂载或安装用户级 LaunchAgent 自动挂载；可按主机维护统一 SMB 密码；新共享可在「自动挂载」轮询中自动挂载（每 60 秒检查已配对在线设备的新共享，需主机统一密码）。
-- 公共能力（两端都可发起或参与）：设备发现、安全配对、P2P 传输（提议/接收确认/发送队列/文件夹 zip 打包）、文件夹同步（多任务、单向主从、配对码关联、失败补偿、停止联动）、访问过本机设备只读记录、远程唤醒（WOL）。
+- 公共能力（两端都可发起或参与）：设备发现、安全配对、P2P 传输（提议/接收确认/发送队列/文件夹默认无压缩传输）、文件夹同步（多任务、单向主从、配对码关联、失败补偿、停止联动）、访问过本机设备只读记录、远程唤醒（WOL）。
 - 公共：React 界面、聊天（实名，必须携带本机 deviceId）、日志、配置格式和测试共用一份代码。
 
 ## 主机 SMB 密码维护（Mac 端）
@@ -156,9 +157,9 @@ innerNet-2.0.0/
 
 ## 群聊能力
 
-- 文字、图片、受限文本附件和压缩文件（zip/7z/rar/tar/gz 等）。
+- 文字、图片、普通文件、压缩文件和文件夹附件；文件夹会自动压缩为 ZIP。
 - 桌面端与手机网页均可选择文件夹，客户端压缩为 ZIP 后传输；最多 500 个文件、原始/压缩后均不超过 200MB。
-- 支持把文件或文件夹直接拖入聊天区域；附件入口已精简为一个按钮，菜单中选择文件/图片或文件夹。
+- 支持把文件或文件夹直接拖入聊天区域；桌面端点击附件按钮后由程序自动判断文件、图片或文件夹，浏览器端保留文件/文件夹选择入口。
 - 文本白名单覆盖常见代码、配置、数据、脚本和文档格式；图片支持 PNG、JPEG、GIF、WebP、BMP、TIFF、ICO、AVIF、HEIC 等常见格式。
 - **实名进入群聊**：`/api/msg` 必须携带本机 `deviceId`（作为 `requesterId`），匿名请求被服务端拒绝（400）；昵称默认为本机设备名，避免局域网内冒名发言。
 - 消息回复与可信引用快照。
@@ -174,13 +175,14 @@ innerNet-2.0.0/
 
 ## P2P 传输（P4，已重构完整链路）
 
-- 三块布局：「我要发送 / 我要接收 / 设置」（`src/components/TransferPage.jsx`）。
+- LocalSend 风格侧栏布局：「接收 / 发送 / 设置」（`src/components/TransferPage.jsx`）。
 - **挑战按配对公钥签发与校验**：接收端服务端用本机 Ed25519 私钥签发挑战，发送端用配对留存的公钥校验；不再依赖易过期的配对会话令牌。
 - **token 鉴权**：offer 时签发 Bearer token，分块与状态接口凭此鉴权；`transferId` 绑定双方设备、配对授权和有效期。
 - **IPC 已接通**：`transfer:offer / sends / listOffers / decide / status / selectFile`。
-- 文件夹自动打包为 ZIP 后发送，无文件大小限制（流式分块）。
+- 文件夹默认使用无压缩容器保持目录结构，接收端校验后自动还原文件夹；设置中可切换为 ZIP 压缩。传输本身使用流式分块，无文件大小限制。
+- 发送历史持久保存，界面默认展示最近五条；已完成或失败记录可删除。缓存目录可在设置中修改，重启后完全生效。
 - 接收目录选择保留在本机 Electron IPC 边界，远端不能指定保存目录；落盘前 SHA-256 校验后原子移动。
-- 仍属 P6 待办：双机真机端到端大文件验证、真实吞吐测试。
+- 发布后仍建议在目标网络完成双机大文件吞吐、断网恢复和 WOL 硬件验收。
 
 ## 验证与构建
 
@@ -191,4 +193,4 @@ npm run build:win   # Windows 安装包
 npm run build:mac   # macOS DMG/ZIP
 ```
 
-详细步骤见 [docs/从零开始.md](docs/从零开始.md)，最终用户操作见 [docs/系统使用说明.md](docs/系统使用说明.md)，代码边界见 [docs/架构说明.md](docs/架构说明.md)，常见问题与版本变更见 [docs/版本更迭.md](docs/版本更迭.md)。
+面向最终用户的完整说明见 [docs/项目使用指南.md](docs/项目使用指南.md)；开发步骤见 [docs/从零开始.md](docs/从零开始.md)，系统操作见 [docs/系统使用说明.md](docs/系统使用说明.md)，代码边界见 [docs/架构说明.md](docs/架构说明.md)，历史问题与版本变更见 [docs/版本更迭.md](docs/版本更迭.md)。

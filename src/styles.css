@@ -366,6 +366,7 @@ body {
 }
 .mount-info { display: flex; gap: 12px; align-items: center; min-width: 0; }
 .mount-info h3 { font-size: 14.5px; font-weight: 600; }
+.mount-status { margin-left: auto; white-space: nowrap; }
 .mount-actions { display: flex; gap: 6px; flex-shrink: 0; }
 
 .mount-mode-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -539,31 +540,6 @@ body {
 .chat-title-copy { display: flex; flex-direction: column; gap: 3px; }
 .chat-title h3 { font-size: 20px; font-weight: 600; color: var(--text); }
 .chat-storage-modal { width: 620px; }
-.chat-attach-wrap { position: relative; flex-shrink: 0; }
-.chat-attach-menu {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + 8px);
-  z-index: 30;
-  display: flex;
-  flex-direction: column;
-  min-width: 150px;
-  padding: 6px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--bg2);
-  box-shadow: 0 10px 30px rgba(0,0,0,.35);
-}
-.chat-attach-menu button {
-  border: 0;
-  border-radius: 6px;
-  padding: 8px 10px;
-  text-align: left;
-  background: transparent;
-  color: var(--text);
-  cursor: pointer;
-}
-.chat-attach-menu button:hover { background: var(--bg3); color: var(--accent); }
 .chat-storage-locations {
   display: flex;
   flex-direction: column;

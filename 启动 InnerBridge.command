@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
-cd "$(dirname "$0")"
+
+# 始终以当前 InnerBridge 项目目录为工作目录，不依赖项目放置位置或旧目录名。
+PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$PROJECT_DIR"
 export ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"
 
 if ! command -v node >/dev/null 2>&1; then

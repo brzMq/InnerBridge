@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import JSZip from 'jszip';
 
 const NICK_KEY = 'inner-net-nick';
@@ -6,6 +6,11 @@ const HOST_KEY = 'inner-net-chat-host';
 
 const createClientId = () =>
   globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+
+function attachmentMimeType(name) {
+  const ext = String(name || '').split('.').pop().toLocaleLowerCase();
+  return ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml', avif: 'image/avif', txt: 'text/plain', md: 'text/markdown', json: 'application/json', csv: 'text/csv', zip: 'application/zip' })[ext] || 'application/octet-stream';
+}
 
 function mergeMessage(list, message) {
   if (!message || !message.id || list.some((item) => item.id === message.id)) return list;
@@ -28,12 +33,24 @@ export default function ChatPage({ isWin }) {
   const [storage, setStorage] = useState(null);
   const [storageBusy, setStorageBusy] = useState(false);
   const [previewImage, setPreviewImage] = useState(null);
-  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [unread, setUnread] = useState(0);
   const [notifyEnabled, setNotifyEnabled] = useState(() => localStorage.getItem('inner-net-chat-notify') !== 'off');
   const listRef = useRef(null);
+  const followLatestRef = useRef(true);
   const esRef = useRef(null);
+
+  const scrollToLatest = useCallback((force = false) => {
+    if (!force && !followLatestRef.current) return;
+    const scroll = () => {
+      const list = listRef.current;
+      if (list) list.scrollTop = list.scrollHeight;
+    };
+    globalThis.requestAnimationFrame(() => {
+      scroll();
+      globalThis.requestAnimationFrame(scroll);
+    });
+  }, []);
 
   // Windows 端：自动获取本机聊天服务；Mac 端：记住上次填的服务器
   useEffect(() => {
@@ -53,6 +70,7 @@ export default function ChatPage({ isWin }) {
   useEffect(() => {
     if (!serverUrl) return;
     if (esRef.current) esRef.current.close();
+    followLatestRef.current = true;
     setStatus('connecting');
     setMessages([]);
 
@@ -87,23 +105,17 @@ export default function ChatPage({ isWin }) {
 
   useEffect(() => { const reset = () => setUnread(0); document.addEventListener('visibilitychange', reset); return () => document.removeEventListener('visibilitychange', reset); }, []);
   useEffect(() => {
-    const closeMenu = (event) => {
-      if (!event.target.closest('.chat-attach-wrap')) setAttachMenuOpen(false);
-    };
-    document.addEventListener('mousedown', closeMenu);
-    return () => document.removeEventListener('mousedown', closeMenu);
-  }, []);
-
-  useEffect(() => {
     if (!previewImage) return undefined;
     const close = (event) => { if (event.key === 'Escape') setPreviewImage(null); };
     document.addEventListener('keydown', close);
     return () => document.removeEventListener('keydown', close);
   }, [previewImage]);
 
-  useEffect(() => {
-    if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
-  }, [messages]);
+  useLayoutEffect(() => {
+    scrollToLatest();
+    const timer = setTimeout(scrollToLatest, 120);
+    return () => clearTimeout(timer);
+  }, [messages, scrollToLatest]);
 
   // 本机设备身份（实名进入群聊，匿名会被服务端拒绝）
   const [myId, setMyId] = useState('');
@@ -150,20 +162,21 @@ export default function ChatPage({ isWin }) {
     } finally {
       setSending(false);
     }
-  }, [text, nick, serverUrl, sending, replyTo, showToast]);
+  }, [text, nick, serverUrl, sending, replyTo, myId, myName, showToast]);
 
 
-  // 图片、文本、压缩文件上传与发送
-  const fileRef = useRef(null);
-  const folderRef = useRef(null);
+  // 图片、普通文件、压缩文件与文件夹上传发送
   const sendFile = useCallback(
     async (file, options = {}) => {
       if (!serverUrl || status !== 'connected') return showToast('未连接', false);
+      if (!myId) return showToast('设备身份正在加载，请稍后重试', false);
       const isImg = /^image\//.test(file.type);
       const archive = /\.(zip|7z|rar|tar|gz|tgz|bz2|xz)$/i.test(file.name || '');
+      const textFile = /\.(txt|text|md|markdown|rst|adoc|csv|tsv|log|json|json5|jsonl|ya?ml|toml|ini|conf|cfg|properties|env|xml|xsl|xsd|sql|js|mjs|cjs|jsx|ts|tsx|vue|svelte|astro|py|rb|php|java|go|rs|c|h|cc|cpp|hpp|cs|swift|kt|kts|sh|bash|zsh|fish|bat|cmd|ps1|psm1|html?|css|scss|less|graphql|gql|tex|rtf|svg)$/i.test(file.name || '');
       if (isImg && file.size > 5 * 1024 * 1024) return showToast('图片不能超过 5MB', false);
-      if (!isImg && !archive && file.size > 1 * 1024 * 1024) return showToast('文本文件不能超过 1MB', false);
+      if (textFile && file.size > 1 * 1024 * 1024) return showToast('文本文件不能超过 1MB', false);
       if (archive && file.size > 200 * 1024 * 1024) return showToast('压缩文件不能超过 200MB', false);
+      if (!isImg && !textFile && !archive && file.size > 200 * 1024 * 1024) return showToast('单个文件不能超过 200MB', false);
       try {
         const suffix = options.folder ? '&folder=1' : '';
         const up = await fetch(`${serverUrl}/api/upload?name=${encodeURIComponent(file.name || '')}&requesterId=${encodeURIComponent(myId)}${suffix}`, {
@@ -197,7 +210,7 @@ export default function ChatPage({ isWin }) {
         showToast(String(e.message || e), false);
       }
     },
-    [serverUrl, status, nick, text, replyTo, showToast]
+    [serverUrl, status, myId, myName, nick, text, replyTo, showToast]
   );
 
   const sendFolder = useCallback(async (fileList) => {
@@ -224,8 +237,36 @@ export default function ChatPage({ isWin }) {
 
   const sendFiles = useCallback(async (fileList) => {
     const files = Array.from(fileList || []);
-    for (const file of files) await sendFile(file);
-  }, [sendFile]);
+    if (!files.length) return;
+    setSending(true);
+    showToast(files.length === 1 ? `正在发送 ${files[0].name}…` : `正在发送 ${files.length} 个文件…`);
+    try {
+      for (const file of files) await sendFile(file);
+    } finally {
+      setSending(false);
+    }
+  }, [sendFile, showToast]);
+
+  const chooseAttachments = useCallback(async () => {
+    if (!serverUrl || status !== 'connected') return showToast('未连接', false);
+    try {
+      const selected = await window.api.chat.selectAttachments();
+      for (const item of selected || []) {
+        const files = [];
+        for (const descriptor of item.files || []) {
+          const raw = await window.api.chat.readSelectedAttachment(descriptor.token);
+          const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw?.data || raw || []);
+          const file = new globalThis.File([bytes], descriptor.name, { type: attachmentMimeType(descriptor.name) });
+          Object.defineProperty(file, 'relativePath', { value: descriptor.relativePath || descriptor.name, enumerable: false });
+          files.push(file);
+        }
+        if (item.kind === 'folder') await sendFolder(files);
+        else await sendFiles(files);
+      }
+    } catch (error) {
+      showToast(String(error.message || error), false);
+    }
+  }, [serverUrl, status, sendFiles, sendFolder, showToast]);
 
   const onDrop = useCallback(async (e) => {
     e.preventDefault();
@@ -427,7 +468,10 @@ export default function ChatPage({ isWin }) {
         </div>
       )}
 
-      <div className="chat-list" ref={listRef}>
+      <div className="chat-list" ref={listRef} onScroll={(event) => {
+        const list = event.currentTarget;
+        followLatestRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
+      }}>
         {visibleMessages.length === 0 ? (
           <div className="chat-empty">
             <span className="chat-empty-icon">{query ? '⌕' : '◇'}</span>
@@ -471,6 +515,7 @@ export default function ChatPage({ isWin }) {
                       alt="图片"
                       loading="lazy"
                       title="点击预览图片"
+                      onLoad={() => scrollToLatest()}
                       onClick={() => setPreviewImage({ url: `${serverUrl}${m.image}`, nick: m.nick, ts: m.ts })}
                       onError={(e) => { e.target.style.display = 'none'; }}
                     />
@@ -512,20 +557,7 @@ export default function ChatPage({ isWin }) {
         <div className="chat-composer-footer">
           <span className="chat-input-hint">Enter 发送 · Shift+Enter 换行 · 支持粘贴或拖入文件</span>
           <div className="chat-composer-actions">
-            <input ref={fileRef} type="file" multiple
-              accept="image/*,.txt,.text,.md,.markdown,.rst,.adoc,.csv,.tsv,.log,.json,.json5,.jsonl,.yaml,.yml,.toml,.ini,.conf,.cfg,.properties,.env,.xml,.xsl,.xsd,.sql,.js,.mjs,.cjs,.jsx,.ts,.tsx,.vue,.svelte,.astro,.py,.rb,.php,.java,.go,.rs,.c,.h,.cc,.cpp,.hpp,.cs,.swift,.kt,.kts,.sh,.bash,.zsh,.fish,.bat,.cmd,.ps1,.psm1,.html,.htm,.css,.scss,.less,.graphql,.gql,.tex,.rtf,.svg,.zip,.7z,.rar,.tar,.gz,.tgz,.bz2,.xz"
-              style={{ display: 'none' }} onChange={(e) => { const files = e.target.files; e.target.value = ''; if (files?.length) sendFiles(files); }} />
-            <input ref={folderRef} type="file" webkitdirectory="" multiple style={{ display: 'none' }}
-              onChange={(e) => { const files = e.target.files; e.target.value = ''; if (files?.length) sendFolder(files); }} />
-            <div className="chat-attach-wrap" onMouseDown={(e) => e.stopPropagation()}>
-              <button className="btn chat-img-btn" title="发送文件或文件夹" aria-label="添加附件" onClick={() => setAttachMenuOpen((open) => !open)}>📎</button>
-              {attachMenuOpen && (
-                <div className="chat-attach-menu">
-                  <button onClick={() => { setAttachMenuOpen(false); fileRef.current?.click(); }}>选择文件或图片</button>
-                  <button onClick={() => { setAttachMenuOpen(false); folderRef.current?.click(); }}>选择文件夹</button>
-                </div>
-              )}
-            </div>
+            <button className="btn chat-img-btn" title="发送文件或文件夹" aria-label="添加附件" disabled={sending} onClick={chooseAttachments}>📎</button>
             <button className="btn primary chat-send-btn" onClick={send} disabled={!serverUrl || status !== 'connected' || sending}>
               {sending ? '发送中…' : '发送'}
             </button>

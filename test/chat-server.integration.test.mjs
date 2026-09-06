@@ -90,6 +90,29 @@ test('压缩文件上传保留类型、名称和大小元数据', async () => {
   });
 });
 
+test('普通二进制文件可以作为聊天附件上传和发送', async () => {
+  const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
+  const response = await fetch(`${info.url}/api/upload?name=${encodeURIComponent('使用说明.pdf')}&requesterId=dev_chat_tester_00000000000000000000000`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/pdf' },
+    body: bytes,
+  });
+  const upload = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(upload.kind, 'file');
+  assert.equal(upload.name, '使用说明.pdf');
+
+  const sent = await postMessage({
+    clientId: 'client_file_0001',
+    requesterId: 'dev_chat_tester_00000000000000000000000',
+    nick: 'Alice',
+    text: '',
+    file: { url: upload.url, name: upload.name, kind: upload.kind, size: upload.size },
+  });
+  assert.equal(sent.response.status, 200);
+  assert.equal(sent.data.msg.file.kind, 'file');
+});
+
 test('手机页面使用本地 JSZip，并为消息和上传携带稳定设备身份', async () => {
   const html = await fetch(`${info.url}/`).then((r) => r.text());
   assert.match(html, /inner-net-web-device-id/);

@@ -199,7 +199,7 @@ export default function DeviceCenter() {
       <div className="device-center-head">
         <div>
           <h2>设备中心</h2>
-          <p>查看本机与已发现的 InnerNet 设备；敏感操作需先完成配对。</p>
+          <p>查看本机与已发现的 InnerBridge 设备；敏感操作需先完成配对。</p>
         </div>
         <button className="btn" onClick={refresh}>
           重新发现

@@ -28,7 +28,7 @@ function normalizeDevice(input = {}) {
     platform: String(d.platform || 'unknown'),
     platformVersion: d.platformVersion ? String(d.platformVersion) : '',
     deviceType: String(d.deviceType || 'unknown'),
-    app: { name: 'InnerNet', version: String(d.app?.version || '2.0.0'), protocolVersion: Number(d.app?.protocolVersion || 1) },
+    app: { name: 'InnerBridge', version: String(d.app?.version || '0.2.0'), protocolVersion: Number(d.app?.protocolVersion || 1) },
     identity: { publicKey: String(d.identity?.publicKey || ''), fingerprint: String(d.identity?.fingerprint || '') },
     network: { addresses: Array.isArray(d.network?.addresses) ? d.network.addresses : [], preferredAddress: String(d.network?.preferredAddress || '') },
     presence: { online: Boolean(d.presence?.online), firstSeenAt: d.presence?.firstSeenAt || null, lastSeenAt: d.presence?.lastSeenAt || null, source: String(d.presence?.source || 'local') },

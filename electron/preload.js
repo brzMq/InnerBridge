@@ -92,6 +92,8 @@ contextBridge.exposeInMainWorld('api', {
 
   chat: {
     info: () => ipcRenderer.invoke('chat:info'),
+    selectAttachments: () => ipcRenderer.invoke('chat:selectAttachments'),
+    readSelectedAttachment: (token) => ipcRenderer.invoke('chat:readSelectedAttachment', token),
     storageStats: () => ipcRenderer.invoke('chat:storageStats'),
     clearStorage: (scope) => ipcRenderer.invoke('chat:clearStorage', scope),
     exportHistory: (options) => ipcRenderer.invoke('chat:export', options),

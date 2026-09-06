@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 
 const SERVICES = [
-  { key: 'discovery', label: '设备发现', proto: 'UDP', port: 49321, desc: '局域网内发现运行 InnerNet 的设备（只广播自身，不主动扫描）' },
+  { key: 'discovery', label: '设备发现', proto: 'UDP', port: 49321, desc: '局域网内发现运行 InnerBridge 的设备（只广播自身，不主动扫描）' },
   { key: 'chat', label: '群聊 / 共享清单', proto: 'TCP', port: 7890, desc: '群聊服务与共享清单接口（Windows 端提供）' },
   { key: 'pairing', label: '安全配对', proto: 'TCP', port: 7891, desc: '设备配对与解除配对消息' },
   { key: 'sync', label: '文件同步', proto: 'TCP', port: 7892, desc: '主从文件同步（从端任务监听此端口）' },
@@ -50,7 +50,7 @@ export default function ServiceSettings() {
       <div className="service-settings-hero">
         <div>
           <h2>服务设置</h2>
-          <p>管理 InnerNet 的设备发现、安全配对、群聊、同步和点对点传输端口。</p>
+          <p>管理 InnerBridge 的设备发现、安全配对、群聊、同步和点对点传输端口。</p>
         </div>
         <button className="btn" onClick={scan}>重新检测</button>
       </div>
@@ -82,7 +82,7 @@ export default function ServiceSettings() {
       </div>
 
       <div className="service-settings-footer">
-        <div><strong>应用新的端口配置</strong><span>保存不会中断当前服务，重启 InnerNet 后统一生效。</span>{message && <em>{message}</em>}</div>
+        <div><strong>应用新的端口配置</strong><span>保存不会中断当前服务，重启 InnerBridge 后统一生效。</span>{message && <em>{message}</em>}</div>
         <button className="btn primary" disabled={busy} onClick={save}>{busy ? '保存中…' : '保存配置'}</button>
       </div>
     </section>

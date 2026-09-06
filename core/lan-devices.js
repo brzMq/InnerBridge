@@ -1,5 +1,5 @@
 /* global module */
-// 局域网设备（未运行 InnerNet）只读展示：解析本机 ARP 表，不主动扫描。
+// 局域网设备（未运行 InnerBridge）只读展示：解析本机 ARP 表，不主动扫描。
 // ARP 表由操作系统在网络流量发生时被动学习，本模块只做读取与格式化。
 
 const DEFAULT_TTL_MS = 10 * 60 * 1000;

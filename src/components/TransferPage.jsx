@@ -10,6 +10,7 @@ const fmtSize = (n) => {
 };
 
 const SEND_STATE = { queued: '排队中', waiting: '等待接收', sending: '传输中', done: '已完成', error: '失败' };
+const RECEIVE_STATE = { accepted: '等待发送', transferring: '正在接收', verifying: '正在校验', completed: '接收完成', failed: '接收失败' };
 
 export default function TransferPage() {
   const [info, setInfo] = useState(null);
@@ -89,7 +90,7 @@ export default function TransferPage() {
       const r = await window.api.transfer.decide({ transferId: offer.transferId, accept });
       if (!r.ok && r.reasonCode !== 'CANCELLED') return show(r.error || `操作失败（${r.reasonCode}）`, false);
       show(accept ? `已接受 ${offer.senderName} 的传输` : `已拒绝 ${offer.senderName} 的传输`);
-      refresh();
+      await refresh();
     } catch (e) { show(String(e.message || e), false); }
   };
 
@@ -114,6 +115,10 @@ export default function TransferPage() {
   };
 
   const tPort = Number(ports?.transfer) || 49152;
+  const pendingOfferCount = offers.filter((offer) => {
+    const state = receiving[offer.transferId]?.state || offer.state;
+    return state === 'offered';
+  }).length;
 
   const sendWorkspace = (
     <>
@@ -136,7 +141,7 @@ export default function TransferPage() {
       ) : <div className="transfer-empty-line">尚未选择内容</div>}
 
       <div className="transfer-device-section">
-        <div className="transfer-section-title"><div><h3>可信设备</h3><p>仅显示在线且已配对的设备</p></div><span>{devices.length} 台可用</span></div>
+        <div className="transfer-section-title"><div><span className="transfer-kicker">选择设备</span><h3>可信设备</h3><p>仅显示在线且已配对的设备</p></div><span>{devices.length} 台可用</span></div>
         {devices.length ? (
           <div className="transfer-device-grid">
             {devices.map((d) => (
@@ -158,8 +163,8 @@ export default function TransferPage() {
 
   const receiveWorkspace = (
     <>
-      <div className="transfer-workspace-head"><div><span className="transfer-kicker">接收文件</span><h2>等待附近设备发送</h2><p>每次传输都需要你确认，文件校验完成后才会写入所选目录。</p></div><span className="transfer-count-badge">{offers.length} 个请求</span></div>
-      {offers.length === 0 ? <div className="transfer-big-empty fill"><span>⌁</span><strong>正在等待传输</strong><p>保持 InnerNet 运行，来自已配对设备的请求会出现在这里。</p></div> : <div className="transfer-offer-list">{offers.map((o) => <div key={o.transferId} className="transfer-offer-card"><span className="transfer-file-icon">{o.kind === 'folder' ? '▰' : '▤'}</span><div><strong>{o.name}</strong><span>来自 {o.senderName} · {o.kind === 'folder' ? '文件夹' : fmtSize(o.size)}</span></div>{receiving[o.transferId] ? <em>{receiving[o.transferId].state === 'completed' ? '接收完成' : '正在接收'}</em> : <div className="transfer-offer-actions"><button className="btn small danger" onClick={() => decide(o, false)}>拒绝</button><button className="btn small primary" onClick={() => decide(o, true)}>接受</button></div>}</div>)}</div>}
+      <div className="transfer-workspace-head"><div><span className="transfer-kicker">接收文件</span><h2>等待附近设备发送</h2><p>每次传输都需要你确认，文件校验完成后才会写入所选目录。</p></div>{pendingOfferCount > 0 && <span className="transfer-count-badge">{pendingOfferCount} 个请求</span>}</div>
+      {offers.length === 0 ? <div className="transfer-big-empty fill"><span>⌁</span><strong>正在等待传输</strong><p>保持 InnerBridge 运行，来自已配对设备的请求会出现在这里。</p></div> : <div className="transfer-offer-list">{offers.map((o) => { const state = receiving[o.transferId]?.state || o.state; return <div key={o.transferId} className="transfer-offer-card"><span className="transfer-file-icon">{o.kind === 'folder' ? '▰' : '▤'}</span><div><strong>{o.name}</strong><span>来自 {o.senderName} · {o.kind === 'folder' ? '文件夹' : fmtSize(o.size)}</span></div>{state !== 'offered' ? <em className={state === 'failed' ? 'error' : ''}>{RECEIVE_STATE[state] || state}</em> : <div className="transfer-offer-actions"><button className="btn small danger" onClick={() => decide(o, false)}>拒绝</button><button className="btn small primary" onClick={() => decide(o, true)}>接受</button></div>}</div>; })}</div>}
     </>
   );
 
@@ -180,7 +185,7 @@ export default function TransferPage() {
       <aside className="transfer-sidebar">
         <div className="transfer-sidebar-brand"><div><strong>P2P 传输</strong><small>可信设备直连</small></div></div>
         <nav aria-label="P2P 传输功能">
-          <button className={section === 'receive' ? 'active' : ''} onClick={() => setSection('receive')}><span>⌁</span>接收{offers.length > 0 && <i>{offers.length}</i>}</button>
+          <button className={section === 'receive' ? 'active' : ''} onClick={() => setSection('receive')}><span>⌁</span>接收{pendingOfferCount > 0 && <i>{pendingOfferCount}</i>}</button>
           <button className={section === 'send' ? 'active' : ''} onClick={() => setSection('send')}><span>➤</span>发送</button>
           <button className={section === 'settings' ? 'active' : ''} onClick={() => setSection('settings')}><span>⚙</span>设置</button>
         </nav>

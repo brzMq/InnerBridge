@@ -1,5 +1,5 @@
 /**
- * InnerNet 主进程
+ * InnerBridge 主进程
  * Windows 端：SMB 共享管理（net user / icacls / net share）
  * macOS 端：聚合挂载管理（mount_smbfs / autofs）
  */
@@ -168,6 +168,66 @@ function toShareName(dirPath) {
 // ---------- 数据存储 ----------
 
 const DATA_DIR = app.getPath('userData');
+const LEGACY_DATA_DIR = path.join(app.getPath('appData'), 'InnerNet 内网共享');
+
+// 0.2.0 起产品名改为 InnerBridge。首次运行时只复制旧目录中尚未迁移的文件，
+// 不删除旧数据，确保 Windows/macOS 上的设备身份、配对、共享和同步配置可延续使用。
+function migrateLegacyUserData() {
+  const legacyDir = LEGACY_DATA_DIR;
+  if (path.resolve(legacyDir) === path.resolve(DATA_DIR) || !fs.existsSync(legacyDir)) return;
+  const entriesToMigrate = [
+    'device.json', 'device.json.private.pem', 'shares.json', 'mounts.json', 'settings.json',
+    'messages.jsonl', 'chat-images', 'chat-files', 'transfer', 'transfer-history.json',
+    'trusted-devices.json', 'host-credentials.json', 'access-log.json', 'wol-targets.json',
+    'sync.json', 'sync-tasks.json', 'sync-index', 'Local Storage',
+  ];
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    for (const entry of entriesToMigrate) {
+      const source = path.join(legacyDir, entry);
+      const target = path.join(DATA_DIR, entry);
+      if (fs.existsSync(source) && !fs.existsSync(target)) {
+        fs.cpSync(source, target, { recursive: true, errorOnExist: false });
+      }
+    }
+  } catch (error) {
+    console.warn(`[migration] 旧版用户数据迁移失败，将使用新目录: ${error.message || error}`);
+  }
+}
+migrateLegacyUserData();
+
+/**
+ * macOS safeStorage 的钥匙串服务可能随产品名变化。先用旧名称解密旧凭据，再用
+ * InnerBridge 名称重新加密到新目录；任一条失败只跳过该条，用户仍可重新配对/填密码。
+ */
+function migrateLegacyCredentials() {
+  const marker = path.join(DATA_DIR, '.innerbridge-credentials-migrated');
+  if (!fs.existsSync(LEGACY_DATA_DIR) || fs.existsSync(marker)) return;
+  const names = ['trusted-devices.json', 'host-credentials.json'];
+  try {
+    const values = new Map();
+    app.setName('InnerNet 内网共享');
+    for (const name of names) {
+      const store = createCredentialStore(path.join(LEGACY_DATA_DIR, name), { safeStorage });
+      const entries = [];
+      for (const key of store.list()) {
+        try { entries.push([key, store.get(key)]); } catch { /* 单条旧凭据不可解密 */ }
+      }
+      values.set(name, entries);
+    }
+    app.setName('InnerBridge');
+    for (const [name, entries] of values) {
+      const store = createCredentialStore(path.join(DATA_DIR, name), { safeStorage });
+      for (const [key, value] of entries) store.set(key, value);
+    }
+    fs.writeFileSync(marker, new Date().toISOString(), { mode: 0o600 });
+  } catch (error) {
+    console.warn(`[migration] 旧版加密凭据迁移失败: ${error.message || error}`);
+  } finally {
+    app.setName('InnerBridge');
+  }
+}
+
 const SHARES_FILE = path.join(DATA_DIR, 'shares.json');
 const MOUNTS_FILE = path.join(DATA_DIR, 'mounts.json');
 const CHAT_MESSAGES_FILE = path.join(DATA_DIR, 'messages.jsonl');
@@ -184,12 +244,33 @@ function loadJSON(file, fallback) {
   }
 }
 function saveJSON(file, data) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf-8');
 }
 const loadShares = () => loadJSON(SHARES_FILE, []);
 const saveShares = (s) => saveJSON(SHARES_FILE, s);
 const loadMounts = () => loadJSON(MOUNTS_FILE, []);
-const saveMounts = (m) => saveJSON(MOUNTS_FILE, m);
+const saveMounts = (mounts) => saveJSON(
+  MOUNTS_FILE,
+  (Array.isArray(mounts) ? mounts : []).map(({ mounted: _mounted, ...mount }) => mount)
+);
+
+/** 按系统当前 mount 表生成瞬时状态；状态不写入清单，避免下次启动显示过期结果。 */
+function mountsWithRuntimeStatus(mounts = loadMounts()) {
+  let mountOutput = '';
+  if (IS_MAC) {
+    try { mountOutput = runCmd('/sbin/mount', []); } catch { /* 状态探测失败时按未挂载展示 */ }
+  }
+  const home = os.homedir();
+  return mounts.map((mount) => {
+    const mountPoint = mount.mountPoint || path.join(home, 'Shared', mount.shareName);
+    return {
+      ...mount,
+      mountPoint,
+      mounted: Boolean(IS_MAC && isMountPointMounted(mountOutput, mountPoint)),
+    };
+  });
+}
 
 /**
  * 供局域网同步的共享清单：只保留挂载所需字段。
@@ -1207,9 +1288,9 @@ function registerIpc() {
   ipcMain.handle('log:history', () => logBuffer.slice());
 
   // ---- 挂载管理（macOS） ----
-  ipcMain.handle('mount:list', () => loadMounts());
+  ipcMain.handle('mount:list', () => mountsWithRuntimeStatus());
 
-  ipcMain.handle('mount:save', (e, mounts) => { const next = Array.isArray(mounts) ? mounts : []; saveMounts(next); if (!next.length) { const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', 'cn.brz.innernet.automount.plist'); try { if (fs.existsSync(plist)) fs.unlinkSync(plist); } catch { /* ignore */ } } return loadMounts(); });
+  ipcMain.handle('mount:save', (e, mounts) => { const next = Array.isArray(mounts) ? mounts : []; saveMounts(next); if (!next.length) { const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', 'cn.brz.innernet.automount.plist'); try { if (fs.existsSync(plist)) fs.unlinkSync(plist); } catch { /* ignore */ } } return mountsWithRuntimeStatus(); });
 
   ipcMain.handle('mount:applyAutofs', async (e, mounts) => {
     try {
@@ -1231,7 +1312,7 @@ function registerIpc() {
         logEvent('warn', 'mount', `自动挂载部分失败（后台将重试）: ${body.firstRunError}`);
       }
       logEvent('info', 'mount', `应用 autofs 配置，${normalized.length} 个共享`);
-      return { autoSmb: body, mounts: normalized, mounted, pending };
+      return { autoSmb: body, mounts: mountsWithRuntimeStatus(normalized), mounted, pending };
     } catch (err) {
       logEvent('error', 'mount', '应用 autofs 配置失败: ' + (err.message || err));
       throw err;
@@ -1468,6 +1549,31 @@ function registerIpc() {
       : '',
     online: chatInfo?.online() || 0,
   }));
+  ipcMain.handle('chat:selectAttachments', async () => {
+    const picked = await dialog.showOpenDialog({
+      title: '选择要发送的文件或文件夹',
+      properties: ['openFile', 'openDirectory', 'multiSelections'],
+    });
+    if (picked.canceled || picked.filePaths.length === 0) return [];
+    return picked.filePaths.map((selectedPath) => {
+      const stat = fs.statSync(selectedPath);
+      if (stat.isDirectory()) {
+        const files = collectChatAttachmentFiles(selectedPath);
+        if (files.length === 0) throw new Error('不能发送空文件夹');
+        return { kind: 'folder', name: path.basename(selectedPath), files: files.map(registerChatAttachmentFile) };
+      }
+      if (!stat.isFile()) throw new Error(`不支持发送该类型：${path.basename(selectedPath)}`);
+      const file = { absolutePath: selectedPath, relativePath: path.basename(selectedPath), name: path.basename(selectedPath), size: stat.size };
+      return { kind: 'file', name: file.name, files: [registerChatAttachmentFile(file)] };
+    });
+  });
+  ipcMain.handle('chat:readSelectedAttachment', (_event, rawToken) => {
+    const token = String(rawToken || '');
+    const selected = chatAttachmentSelections.get(token);
+    chatAttachmentSelections.delete(token);
+    if (!selected || selected.expiresAt < Date.now()) throw new Error('附件选择已失效，请重新选择');
+    return fs.readFileSync(selected.path);
+  });
   ipcMain.handle('chat:storageStats', () => {
     if (!IS_WIN) throw new Error('聊天记录管理仅在 Windows 共享端可用');
     return {
@@ -1521,6 +1627,32 @@ let accessLog = null;
 let discoveryService = null;
 let syncService = null;
 let autoMountTimer = null;
+const chatAttachmentSelections = new Map();
+
+function collectChatAttachmentFiles(rootPath) {
+  const rootName = path.basename(rootPath);
+  const files = [];
+  const visit = (currentPath, relativeDir = '') => {
+    for (const entry of fs.readdirSync(currentPath, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) continue;
+      const absolutePath = path.join(currentPath, entry.name);
+      const relativePath = path.join(rootName, relativeDir, entry.name).split(path.sep).join('/');
+      if (entry.isDirectory()) visit(absolutePath, path.join(relativeDir, entry.name));
+      else if (entry.isFile()) files.push({ absolutePath, relativePath, name: entry.name, size: fs.statSync(absolutePath).size });
+      if (files.length > 500) throw new Error('文件夹最多包含 500 个文件');
+    }
+  };
+  visit(rootPath);
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+  if (total > 200 * 1024 * 1024) throw new Error('文件夹原始内容不能超过 200MB');
+  return files;
+}
+
+function registerChatAttachmentFile(file) {
+  const token = crypto.randomBytes(24).toString('hex');
+  chatAttachmentSelections.set(token, { path: file.absolutePath, expiresAt: Date.now() + 5 * 60 * 1000 });
+  return { token, name: file.name, relativePath: file.relativePath, size: file.size };
+}
 /**
  * 本机解除对某设备的信任，并立即把变更推给界面。
  * reason=remote 表示是对端主动送达的撤销，界面据此区分「从未配对」和「被对方解除」。
@@ -1597,6 +1729,7 @@ function buildRuntimeLocalDevice() {
     platformVersion: os.release(),
     deviceType: IS_WIN ? 'desktop' : 'laptop',
     deviceName: os.hostname(),
+    app: { name: 'InnerBridge', version: app.getVersion(), protocolVersion: 1 },
     network: { addresses: getLocalIPs().map((n) => ({ address: n.ip, interfaceName: n.iface, family: 'IPv4' })) },
     config: { wolTarget: physicalNics.length > 0 },
     // services 是发现协议需要的端点；capabilityServices 是“功能此刻是否能工作”的运行态。
@@ -1733,7 +1866,7 @@ function createWindow() {
     height: 720,
     minWidth: 860,
     minHeight: 560,
-    title: 'InnerNet 内网共享',
+    title: 'InnerBridge',
     autoHideMenuBar: true,
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#0f1419' : '#f5f7fa',
     webPreferences: {
@@ -1772,6 +1905,7 @@ function createWindow() {
 // ---------- 启动 ----------
 
 app.whenReady().then(() => {
+  migrateLegacyCredentials();
   logEvent('info', 'app', `应用启动 (平台=${PLATFORM}${IS_WIN ? (isAdmin() ? '，管理员' : '，普通权限') : ''})`);
   // 非管理员仍允许打开界面查看状态，但高权限操作会被 IPC 守卫拒绝，前端显示红色权限提示。
   if (IS_WIN && !isAdmin()) logEvent('warn', 'app', '当前普通权限运行，高权限共享功能受限');
